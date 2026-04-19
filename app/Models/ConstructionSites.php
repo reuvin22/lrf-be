@@ -15,6 +15,7 @@ class ConstructionSites extends Model
     public $timestamps = true;
 
     protected $fillable = [
+        'site_id',
         'site_code',
         'site_name',
         'client_name',

@@ -8,6 +8,7 @@ use App\Http\Resources\v1\SiteAssignmentResource;
 use App\Models\SiteAssignment;
 use App\Models\SiteAssignments;
 use Illuminate\Http\Request;
+use Illuminate\Support\Str;
 
 class SiteAssignmentController extends Controller
 {
@@ -23,7 +24,7 @@ class SiteAssignmentController extends Controller
     public function store(SiteAssignmentRequest $request)
     {
         $validated = $request->validated();
-
+        $validated['assignment_id'] = (string) Str::uuid();
         $siteAssignment = SiteAssignments::create($validated);
 
         return response()->json([

@@ -3,9 +3,11 @@
 namespace App\Http\Controllers\v1;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\v1\OcrUploadsCategoryRequest;
 use Illuminate\Http\Request;
 use App\Models\OcrUploadCategory;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Str;
 
 class OcrCategoriesController extends Controller
 {
@@ -15,23 +17,12 @@ class OcrCategoriesController extends Controller
         return response()->json(['data' => $categories], 200);
     }
 
-    public function store(Request $request)
+    public function store(OcrUploadsCategoryRequest $request)
     {
-        $validator = Validator::make($request->all(), [
-            'category_name' => 'required|string|max:255',
-            'description' => 'nullable|string|max:500',
-            'status' => 'required|in:Active,Inactive',
-        ]);
+        $data = $request->validated();
+        $data['category_id'] = (string) Str::uuid();
 
-        if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
-        }
-
-        $category = OcrUploadCategory::create([
-            'category_name' => $request->category_name,
-            'description' => $request->description,
-            'status' => $request->status,
-        ]);
+        $category = OcrUploadCategory::create($data);
 
         return response()->json(['data' => $category], 201);
     }
@@ -47,27 +38,24 @@ class OcrCategoriesController extends Controller
         return response()->json(['data' => $category], 200);
     }
 
-    public function update(Request $request, $id)
+    public function update(OcrUploadsCategoryRequest $request, $id)
     {
         $category = OcrUploadCategory::find($id);
 
         if (!$category) {
-            return response()->json(['message' => 'Category not found'], 404);
+            return response()->json([
+                'message' => 'Category not found'
+            ], 404);
         }
 
-        $validator = Validator::make($request->all(), [
-            'category_name' => 'sometimes|required|string|max:255',
-            'description' => 'nullable|string|max:500',
-            'status' => 'sometimes|required|in:Active,Inactive',
-        ]);
+        $validated = $request->validated();
 
-        if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
-        }
+        $category->update($validated);
 
-        $category->update($request->only(['category_name', 'description', 'status']));
-
-        return response()->json(['data' => $category], 200);
+        return response()->json([
+            'message' => 'Category updated successfully',
+            'data' => $category
+        ], 200);
     }
 
     public function destroy($id)

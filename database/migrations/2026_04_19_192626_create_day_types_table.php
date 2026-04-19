@@ -11,11 +11,11 @@ return new class extends Migration
      */
     public function up(): void
     {
-        Schema::create('site_expense_categories', function (Blueprint $table) {
-            $table->uuid('category_id')->primary();
-            $table->string('category_name');
-            $table->string('description')->nullable();
-            $table->enum('status', ['ACTIVE', 'INACTIVE'])->default('INACTIVE');
+        Schema::create('day_types', function (Blueprint $table) {
+            $table->id();
+            $table->string('value');
+            $table->string('description');
+            $table->decimal('overtime_multiplier', 8, 2);
             $table->timestamps();
         });
     }
@@ -25,6 +25,6 @@ return new class extends Migration
      */
     public function down(): void
     {
-        Schema::dropIfExists('site_expense_categories');
+        Schema::dropIfExists('day_types');
     }
 };

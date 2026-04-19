@@ -12,9 +12,11 @@ return new class extends Migration
     public function up(): void
     {
         Schema::create('company_calendars', function (Blueprint $table) {
-            $table->date('date')->primary();
-            $table->enum('day_type', ['WORKDAY', 'HOLIDAY', 'LEGAL_HOLIDAY', 'NATIONAL_HOLIDAY']);
+            $table->uuid('calendar_id')->primary();
+            $table->date('date');
+            $table->integer('day_type');
             $table->string('note')->nullable();
+            $table->timestamps();
         });
     }
 

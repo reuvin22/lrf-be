@@ -13,7 +13,7 @@ return new class extends Migration
     {
         Schema::create('subcontractor_workers', function (Blueprint $table) {
             $table->uuid('worker_id')->primary();
-            $table->uuid('subcontractor_id')->index();
+            $table->uuid('subcontractor_id')->nullable()->index();
             $table->string('name')->index();
             $table->string('name_kana')->nullable();
 

@@ -9,6 +9,7 @@ use App\Models\SubContractors;
 use App\Models\SubContractorsWorkers;
 use App\Models\SubcontractorWorker;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Str;
 
 class SubContractorController extends Controller
 {
@@ -27,7 +28,10 @@ class SubContractorController extends Controller
 
     public function store(SubContractorRequest $request): JsonResponse
     {
-        $worker = SubContractorsWorkers::create($request->validated());
+        $data = $request->validated();
+        $data['subcontractor_id'] = (string) Str::uuid();
+
+        $worker = SubContractors::create($data);
 
         return response()->json([
             'success' => true,
@@ -38,7 +42,7 @@ class SubContractorController extends Controller
 
     public function show(string $id): JsonResponse
     {
-        $worker = SubContractorsWorkers::findOrFail($id);
+        $worker = SubContractors::findOrFail($id);
 
         return response()->json([
             'success' => true,
@@ -48,7 +52,7 @@ class SubContractorController extends Controller
 
     public function update(SubContractorRequest $request, string $id): JsonResponse
     {
-        $worker = SubContractorsWorkers::findOrFail($id);
+        $worker = SubContractors::findOrFail($id);
 
         $worker->update($request->validated());
 
@@ -61,7 +65,7 @@ class SubContractorController extends Controller
 
     public function destroy(string $id): JsonResponse
     {
-        $worker = SubContractorsWorkers::findOrFail($id);
+        $worker = SubContractors::findOrFail($id);
 
         $worker->delete();
 

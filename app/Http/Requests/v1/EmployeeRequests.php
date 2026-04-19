@@ -29,13 +29,13 @@ class EmployeeRequests extends FormRequest
             'line_user_id' => 'nullable|string|max:255',
             'email' => 'nullable|email|max:255',
             'employment_type' => 'required|string|in:FULL_TIME,PART_TIME,CONTRACT',
-            'role' => 'required|string|in:ADMIN,EMPLOYEE,MANAGER',
+            'role' => 'required|string|in:GENERAL,ADMIN,ACCOUNTING',
             'base_salary' => 'required|integer|min:0',
             'monthly_work_hours' => 'required|numeric|min:0',
             'cost_rate' => 'required|integer|min:0',
             'commute_cost_monthly' => 'nullable|integer|min:0',
             'joined_date' => 'required|date',
-            'status' => 'required|string|in:ACTIVE,INACTIVE',
+            'status' => 'required|string|in:ACTIVE,RESIGNED',
         ];
     }
 }

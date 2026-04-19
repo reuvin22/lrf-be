@@ -13,6 +13,7 @@ class SubContractors extends Model
     public $timestamps = true;
 
     protected $fillable = [
+        'subcontractor_id',
         'company_name',
         'contact_person',
         'contact_phone',
@@ -20,7 +21,8 @@ class SubContractors extends Model
     ];
 
     protected $casts = [
-        'status' => 'boolean',
+        'subcontractor_id' => 'string',
+        'status' => 'string',
     ];
 
     // public function siteAssignments()

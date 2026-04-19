@@ -21,7 +21,7 @@ return new class extends Migration
             $table->string('company_name');
             $table->uuid('site_id');
             $table->timestampTz('start_time');
-            $table->timestampTz('end_time');
+            $table->timestampTz('end_time')->nullable();
             $table->timestamps();
             $table->foreign('attendance_id')
                 ->references('attendance_id')

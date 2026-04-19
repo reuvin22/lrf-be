@@ -2,16 +2,21 @@
 
 use App\Http\Controllers\v1\AttendanceController;
 use App\Http\Controllers\v1\AttendanceSubSegmentController;
+use App\Http\Controllers\v1\CompanyCalendarController;
 use App\Http\Controllers\v1\ConstructionSitesController;
+use App\Http\Controllers\v1\DayTypeController;
 use App\Http\Controllers\v1\EmployeeController;
 use App\Http\Controllers\v1\OcrCategoriesController;
 use App\Http\Controllers\v1\OcrUploadController;
+use App\Http\Controllers\v1\RatesController;
 use App\Http\Controllers\v1\SegmentController;
 use App\Http\Controllers\v1\SiteAssignmentController;
+use App\Http\Controllers\v1\SiteExpenseCategoryController;
 use App\Http\Controllers\v1\SiteSubContractorController;
 use App\Http\Controllers\v1\SubContractorController;
 use App\Http\Controllers\v1\SubContractorReportController;
 use App\Http\Controllers\v1\SubContractorWorkersController;
+use App\Http\Controllers\v1\SystemSettingController;
 use App\Http\Controllers\v1\TransportationExpenseController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
@@ -36,7 +41,12 @@ Route::prefix('v1')->group(function() {
     Route::resource('subcontractor-workers', SubContractorWorkersController::class);
     Route::resource('attendance-subcontractor-segments', AttendanceSubSegmentController::class);
     Route::resource('ocr-uploads', OcrUploadController::class);
+    Route::resource('rates', RatesController::class);
+    Route::resource('company-calendar', CompanyCalendarController::class);
+    Route::resource('day-types', DayTypeController::class);
+    Route::resource('settings', SystemSettingController::class);
     Route::resource('ocr-categories', OcrCategoriesController::class);
+    Route::resource('site-expense-categories', SiteExpenseCategoryController::class);
     Route::get('dashboard', [AttendanceController::class, 'dashboard']);
     Route::post('attendance-employee', [AttendanceController::class, 'attendance_employee']);
     Route::get('get-attendance-employee', [AttendanceController::class, 'get_attendance_employee_by_attendance']);

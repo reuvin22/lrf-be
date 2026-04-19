@@ -11,6 +11,7 @@ class SiteAssignments extends Model
     public $timestamps = true;
 
     protected $fillable = [
+        'assignment_id',
         'employee_id',
         'site_id',
         'is_leader',

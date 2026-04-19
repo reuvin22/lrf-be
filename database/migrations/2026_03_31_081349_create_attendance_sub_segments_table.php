@@ -21,7 +21,7 @@ return new class extends Migration
             $table->uuid('site_id');
             $table->string('site_name');
             $table->timestampTz('start_time');
-            $table->timestampTz('end_time');
+            $table->timestampTz('end_time')->nullable();
             $table->string('contract_type');
             $table->uuid('company_id');
             $table->string('company_name');

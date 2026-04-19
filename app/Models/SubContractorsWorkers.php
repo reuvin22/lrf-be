@@ -14,13 +14,15 @@ class SubContractorsWorkers extends Model
 
     protected $fillable = [
         'subcontractor_id',
+        'worker_id',
         'name',
         'name_kana',
         'status',
     ];
 
     protected $casts = [
-        'status' => 'boolean',
+        'status' => 'string',
+        'worker_id' => 'string'
     ];
 
     public function subcontractor()

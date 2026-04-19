@@ -10,6 +10,7 @@ use App\Models\OcrUploads;
 use App\Services\FirebaseService;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 class OcrUploadController extends Controller
 {
@@ -23,6 +24,7 @@ class OcrUploadController extends Controller
     public function store(OcrUploadRequest $request, FirebaseService $firebase)
     {
         $data = $request->validated();
+        $data['upload_id'] = (string) Str::uuid();
         $base64 = $request->input('image_base64');
 
         if (!empty($base64)) {

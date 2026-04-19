@@ -9,17 +9,19 @@ class OcrUploadCategory extends Model
     protected $table = 'ocr_upload_categories';
 
     protected $primaryKey = 'category_id';
-
+    protected $keyType = 'string';
     public $timestamps = true;
 
     protected $fillable = [
+        'category_id',
         'category_name',
         'description',
         'status',
     ];
 
     protected $casts = [
-        'status' => 'boolean',
+        'status' => 'string',
+        'category_id' => 'string'
     ];
 
     const STATUS_ACTIVE = 'Active';

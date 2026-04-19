@@ -36,7 +36,7 @@ class AttendanceController extends Controller
     public function store(AttendanceRequest $request)
     {
         $validated = $request->validated();
-
+        $validated['uuid'] = (string) Str::uuid();
         $existing = Attendance::where('employee_id', $validated['employee_id'])
             ->where('work_date', $validated['work_date'])
             ->first();

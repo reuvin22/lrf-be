@@ -23,7 +23,6 @@ class AttendanceEmployeeRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'uuid' => 'required|uuid',
             'attendance_id' => 'required|uuid',
             'employee_id' => 'required|uuid'
         ];

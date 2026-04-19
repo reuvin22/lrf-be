@@ -22,7 +22,6 @@ class SubContractorRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'subcontractor_id' => 'required|uuid',
             'company_name' => 'required|string|max:255',
             'contact_person' => 'nullable|string|max:255',
             'contact_phone' => 'nullable|string|max:255',

@@ -5,7 +5,7 @@ namespace App\Http\Requests\v1;
 use Illuminate\Contracts\Validation\ValidationRule;
 use Illuminate\Foundation\Http\FormRequest;
 
-class SubContractorWorkerRequest extends FormRequest
+class DayTypeRequest extends FormRequest
 {
     /**
      * Determine if the user is authorized to make this request.
@@ -23,10 +23,9 @@ class SubContractorWorkerRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'subcontractor_id' => 'nullable|uuid',
-            'name' => 'required|string',
-            'name_kana' => 'nullable|string',
-            'status' => 'required|string|in:ACTIVE,INACTIVE'
+            'value' => 'required|string|in:WORKDAY,HOLIDAY,LEGAL_HOLIDAY,NATIONAL_HOLIDAY',
+            'description' => 'required|string|max:255',
+            'overtime_multiplier' => 'required|numeric|min:0|max:999999.99',
         ];
     }
 }

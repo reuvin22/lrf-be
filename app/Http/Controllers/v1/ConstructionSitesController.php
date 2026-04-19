@@ -7,6 +7,7 @@ use App\Http\Requests\v1\ConstructionSitesRequest;
 use App\Models\ConstructionSite;
 use App\Models\ConstructionSites;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Str;
 
 class ConstructionSitesController extends Controller
 {
@@ -22,7 +23,10 @@ class ConstructionSitesController extends Controller
 
     public function store(ConstructionSitesRequest $request): JsonResponse
     {
-        $site = ConstructionSites::create($request->validated());
+        $data = $request->validated();
+        $data['site_id'] = Str::uuid();
+
+        $site = ConstructionSites::create($data);
 
         return response()->json([
             'success' => true,

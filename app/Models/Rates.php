@@ -9,10 +9,11 @@ class Rates extends Model
     protected $table = 'rates';
 
     protected $primaryKey = 'rate_id';
-
+    protected $keyType = 'string';
     public $timestamps = false;
 
     protected $fillable = [
+        'rate_id',
         'rate_type',
         'target_type',
         'target_id',
@@ -26,6 +27,7 @@ class Rates extends Model
         'unit_price' => 'decimal:2',
         'effective_from' => 'date',
         'effective_to' => 'date',
+        'rate_id' => 'string'
     ];
 
     public function employee()

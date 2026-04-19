@@ -3,10 +3,12 @@
 namespace App\Http\Controllers\v1;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\v1\SubContractorWorkerRequest;
 use App\Models\SubContractorsWorkers;
 use App\Models\SubContractorWorker;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Str;
 
 class SubContractorWorkersController extends Controller
 {
@@ -16,20 +18,11 @@ class SubContractorWorkersController extends Controller
         return response()->json(['data' => $workers]);
     }
 
-    public function store(Request $request)
+    public function store(SubContractorWorkerRequest $request)
     {
-        $validator = Validator::make($request->all(), [
-            'subcontractor_id' => 'required|integer',
-            'name' => 'required|string|max:255',
-            'name_kana' => 'nullable|string|max:255',
-            'status' => 'required|string|in:active,inactive',
-        ]);
-
-        if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
-        }
-
-        $worker = SubContractorsWorkers::create($validator->validated());
+        $data = $request->validated();
+        $data['worker_id'] = Str::uuid();
+        $worker = SubContractorsWorkers::create($data);
 
         return response()->json([
             'message' => 'Worker created successfully',
@@ -48,7 +41,7 @@ class SubContractorWorkersController extends Controller
         return response()->json(['data' => $worker]);
     }
 
-    public function update(Request $request, $id)
+    public function update(SubContractorWorkerRequest $request, $id)
     {
         $worker = SubContractorsWorkers::find($id);
 
@@ -56,18 +49,9 @@ class SubContractorWorkersController extends Controller
             return response()->json(['message' => 'Worker not found'], 404);
         }
 
-        $validator = Validator::make($request->all(), [
-            'subcontractor_id' => 'sometimes|integer',
-            'name' => 'sometimes|string|max:255',
-            'name_kana' => 'nullable|string|max:255',
-            'status' => 'sometimes|string|in:active,inactive',
-        ]);
+        $validated = $request->validated();
 
-        if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
-        }
-
-        $worker->update($validator->validated());
+        $worker->update($validated);
 
         return response()->json([
             'message' => 'Worker updated successfully',

@@ -9,10 +9,11 @@ class OcrUploads extends Model
     protected $table = 'ocr_uploads';
 
     protected $primaryKey = 'upload_id';
-
-    public $timestamps = false;
+    public $incrementing = false;
+    protected $keyType = 'string';
 
     protected $fillable = [
+        'upload_id',
         'uploaded_by',
         'upload_source',
         'category_id',
@@ -38,7 +39,8 @@ class OcrUploads extends Model
         'confirmed_at' => 'datetime',
         'uploaded_at' => 'datetime',
         'processed_at' => 'datetime',
-        'ocr_result_raw' => 'array'
+        'ocr_result_raw' => 'array',
+        'upload_id' => 'string'
     ];
 
     public function uploader()
