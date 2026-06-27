@@ -1,0 +1,47 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(php -l app/Console/Commands/SheetsSetup.php)",
+      "Bash(php -l app/Http/Controllers/v1/EmployeeController.php)",
+      "Bash(php -l app/Http/Requests/v1/EmployeeRequests.php)",
+      "Bash(php -l app/Helpers/SalaryCalculator.php)",
+      "Bash(php -l app/Services/SalaryRecordService.php)",
+      "Bash(php -l app/Console/Commands/SalaryClose.php)",
+      "Bash(php -l routes/console.php)",
+      "Bash(php artisan *)",
+      "Bash(php -r ' *)",
+      "Bash(./vendor/bin/pint app/Helpers/SalaryCalculator.php app/Services/SalaryRecordService.php app/Console/Commands/SalaryClose.php routes/console.php)",
+      "Bash(php -r 'require \"app/Helpers/SalaryCalculator.php\"; use App\\\\Helpers\\\\SalaryCalculator as S; $r=S::computeFullTime\\([\"base_salary\"=>300000,\"monthly_work_hours\"=>160,\"overtime_hours\"=>10,\"commute_cost\"=>15000]\\); echo \"FT gross={$r[\"gross_salary\"]}\\\\n\";')",
+      "Bash(php -l app/Services/SystemSettingsService.php)",
+      "Bash(php -l app/Http/Controllers/v1/SalaryController.php)",
+      "Bash(php -l app/Http/Requests/v1/SalaryCalculateRequest.php)",
+      "Bash(php -l routes/api.php)",
+      "Bash(curl -s -X POST http://127.0.0.1:8000/api/v1/salary/calculate -H \"Content-Type: application/json\" -H \"Accept: application/json\" -d \"{\\\\\"employees\\\\\":[{\\\\\"employee_id\\\\\":\\\\\"E-001\\\\\",\\\\\"name\\\\\":\\\\\"Tanaka\\\\\",\\\\\"employment_type\\\\\":\\\\\"FULL_TIME\\\\\",\\\\\"base_salary\\\\\":300000,\\\\\"monthly_work_hours\\\\\":160,\\\\\"overtime_hours\\\\\":10,\\\\\"commute_cost\\\\\":15000},{\\\\\"employee_id\\\\\":\\\\\"E-002\\\\\",\\\\\"name\\\\\":\\\\\"Suzuki\\\\\",\\\\\"employment_type\\\\\":\\\\\"PART_TIME\\\\\",\\\\\"hourly_rate\\\\\":1300,\\\\\"worked_hours\\\\\":90,\\\\\"overtime_hours\\\\\":5}]}\")",
+      "Bash(curl -s -w \"\\\\nHTTP_STATUS:%{http_code}\\\\n\" -o /tmp/salary_resp.json -X POST http://127.0.0.1:8000/api/v1/salary/calculate -H \"Content-Type: application/json\" -H \"Accept: application/json\" -d \"{\\\\\"employees\\\\\":[{\\\\\"employee_id\\\\\":\\\\\"E-001\\\\\",\\\\\"name\\\\\":\\\\\"Tanaka\\\\\",\\\\\"employment_type\\\\\":\\\\\"FULL_TIME\\\\\",\\\\\"base_salary\\\\\":300000,\\\\\"monthly_work_hours\\\\\":160,\\\\\"overtime_hours\\\\\":10,\\\\\"commute_cost\\\\\":15000},{\\\\\"employee_id\\\\\":\\\\\"E-002\\\\\",\\\\\"name\\\\\":\\\\\"Suzuki\\\\\",\\\\\"employment_type\\\\\":\\\\\"PART_TIME\\\\\",\\\\\"hourly_rate\\\\\":1300,\\\\\"worked_hours\\\\\":90,\\\\\"overtime_hours\\\\\":5}]}\")",
+      "Read(//tmp/**)",
+      "Bash(php -m)",
+      "Bash(php --ini)",
+      "Bash(where php *)",
+      "Bash(php -i)",
+      "Bash(findstr /C:\"extension_dir\")",
+      "Bash(php -r \"echo PHP_BINARY, PHP_EOL; echo ini_get\\('extension_dir'\\), PHP_EOL;\")",
+      "Bash(powershell -Command \"Get-Process php -ErrorAction SilentlyContinue | Stop-Process -Force; Write-Output 'php processes stopped'\")",
+      "Bash(php -l app/Services/GoogleSheetService.php)",
+      "Bash(php -l app/Http/Controllers/v1/RatesController.php)",
+      "Bash(php -l app/Http/Requests/v1/RatesRequest.php)",
+      "Bash(node --check apps-script/Code.gs)",
+      "Bash(cp apps-script/Code.gs /tmp/code_check.js)",
+      "Bash(node --check /tmp/code_check.js)",
+      "Bash(rm -f /tmp/code_check.js)",
+      "Bash(cp apps-script/Code.gs /tmp/c.js)",
+      "Bash(node --check /tmp/c.js)",
+      "Bash(rm -f /tmp/c.js)",
+      "Bash(cp apps-script/SalaryClose.gs /tmp/sc.js)",
+      "Bash(node --check /tmp/sc.js)",
+      "Bash(rm -f /tmp/sc.js)"
+    ]
+  },
+  "enabledMcpjsonServers": [
+    "laravel-boost"
+  ]
+}
