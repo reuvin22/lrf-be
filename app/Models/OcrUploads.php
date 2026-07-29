@@ -10,7 +10,7 @@ class OcrUploads extends Model
 
     protected $primaryKey = 'upload_id';
     public $incrementing = false;
-    protected $keyType = 'string';
+    protected $keyType = 'string';  
 
     protected $fillable = [
         'upload_id',
