@@ -1,4 +1,4 @@
-FROM php:8.5-fpm
+FROM php:8.5-cli
 
 WORKDIR /var/www
 
@@ -16,6 +16,6 @@ RUN composer install --no-dev --optimize-autoloader
 
 RUN chown -R www-data:www-data /var/www/storage /var/www/bootstrap/cache
 
-EXPOSE 9000
+EXPOSE 8080
 
-CMD ["php-fpm"]
+CMD php artisan serve --host=0.0.0.0 --port=${PORT}
