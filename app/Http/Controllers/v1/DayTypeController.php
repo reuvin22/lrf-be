@@ -2,93 +2,44 @@
 
 namespace App\Http\Controllers\v1;
 
-use App\Http\Controllers\Controller;
 use App\Http\Requests\v1\DayTypeRequest;
-use App\Models\DayType;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Str;
 
-class DayTypeController extends Controller
+class DayTypeController extends SheetResourceController
 {
-    /**
-     * List all
-     */
-    public function index()
+    protected string $sheetName = 'DayTypes';
+    protected string $idColumn  = 'id';
+    protected array $headers    = ['id', 'value', 'description', 'overtime_multiplier'];
+
+    public function store(DayTypeRequest $request): JsonResponse
     {
-        $data = DayType::latest()->get();
+        $data       = $request->validated();
+        $data['id'] = (string) Str::uuid();
+
+        $this->appendRow($data);
 
         return response()->json([
-            'data' => $data
-        ]);
-    }
-
-    /**
-     * Store
-     */
-    public function store(DayTypeRequest $request)
-    {
-        $dayType = DayType::create($request->validated());
-
-        return response()->json([
-            'message' => 'Day type created successfully',
-            'data' => $dayType
+            'success' => true,
+            'message' => 'Day type created successfully.',
+            'data'    => $data,
         ], 201);
     }
 
-    /**
-     * Show single
-     */
-    public function show(string $id)
+    public function update(DayTypeRequest $request, string $id): JsonResponse
     {
-        $dayType = DayType::find($id);
+        $located = $this->locate($id);
+        if (!$located) return $this->notFound();
 
-        if (!$dayType) {
-            return response()->json([
-                'message' => 'Day type not found'
-            ], 404);
-        }
+        $data       = array_merge($located['data'], $request->validated());
+        $data['id'] = $id;
+
+        $this->updateRowAt($located['rowNumber'], $data);
 
         return response()->json([
-            'data' => $dayType
-        ]);
-    }
-
-    /**
-     * Update
-     */
-    public function update(DayTypeRequest $request, string $id)
-    {
-        $dayType = DayType::find($id);
-
-        if (!$dayType) {
-            return response()->json([
-                'message' => 'Day type not found'
-            ], 404);
-        }
-
-        $dayType->update($request->validated());
-
-        return response()->json([
-            'message' => 'Day type updated successfully',
-            'data' => $dayType
-        ]);
-    }
-
-    /**
-     * Delete
-     */
-    public function destroy(string $id)
-    {
-        $dayType = DayType::find($id);
-
-        if (!$dayType) {
-            return response()->json([
-                'message' => 'Day type not found'
-            ], 404);
-        }
-
-        $dayType->delete();
-
-        return response()->json([
-            'message' => 'Day type deleted successfully'
+            'success' => true,
+            'message' => 'Day type updated successfully.',
+            'data'    => $data,
         ]);
     }
 }

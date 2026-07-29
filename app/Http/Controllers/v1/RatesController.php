@@ -2,96 +2,47 @@
 
 namespace App\Http\Controllers\v1;
 
-use App\Http\Controllers\Controller;
 use App\Http\Requests\v1\RatesRequest;
-use App\Models\Rates;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Str;
 
-class RatesController extends Controller
+class RatesController extends SheetResourceController
 {
-    /**
-     * Display all rates
-     */
-    public function index()
+    protected string $sheetName = 'Rates';
+    protected string $idColumn  = 'rate_id';
+    protected array $headers    = [
+        'rate_id', 'rate_type', 'target_type', 'target_id', 'target_name',
+        'site_id', 'site_name', 'unit_price', 'effective_from', 'effective_to',
+    ];
+
+    public function store(RatesRequest $request): JsonResponse
     {
-        $rates = Rates::with(['employee', 'sub_contractor', 'site'])->get();
+        $data            = $request->validated();
+        $data['rate_id'] = (string) Str::uuid();
+
+        $this->appendRow($data);
 
         return response()->json([
-            'data' => $rates
-        ]);
-    }
-
-    /**
-     * Store new rate
-     */
-    public function store(RatesRequest $request)
-    {
-        $validated = $request->validated();
-        $validated['rate_id'] = (string) Str::uuid();
-        $rate = Rates::create($validated);
-        return response()->json([
-            'message' => 'Rate created successfully',
-            'data' => $rate
+            'success' => true,
+            'message' => 'Rate created successfully.',
+            'data'    => $data,
         ], 201);
     }
 
-    /**
-     * Show single rate
-     */
-    public function show(string $id)
+    public function update(RatesRequest $request, string $id): JsonResponse
     {
-        $rate = Rates::with(['employee', 'sub_contractor', 'site'])
-            ->find($id);
+        $located = $this->locate($id);
+        if (!$located) return $this->notFound();
 
-        if (!$rate) {
-            return response()->json([
-                'message' => 'Rate not found'
-            ], 404);
-        }
+        $data            = array_merge($located['data'], $request->validated());
+        $data['rate_id'] = $id;
+
+        $this->updateRowAt($located['rowNumber'], $data);
 
         return response()->json([
-            'data' => $rate
-        ]);
-    }
-
-    /**
-     * Update rate
-     */
-    public function update(RatesRequest $request, string $id)
-    {
-        $rate = Rates::find($id);
-
-        if (!$rate) {
-            return response()->json([
-                'message' => 'Rate not found'
-            ], 404);
-        }
-
-        $rate->update($request->validated());
-
-        return response()->json([
-            'message' => 'Rate updated successfully',
-            'data' => $rate
-        ]);
-    }
-
-    /**
-     * Delete rate
-     */
-    public function destroy(string $id)
-    {
-        $rate = Rates::find($id);
-
-        if (!$rate) {
-            return response()->json([
-                'message' => 'Rate not found'
-            ], 404);
-        }
-
-        $rate->delete();
-
-        return response()->json([
-            'message' => 'Rate deleted successfully'
+            'success' => true,
+            'message' => 'Rate updated successfully.',
+            'data'    => $data,
         ]);
     }
 }

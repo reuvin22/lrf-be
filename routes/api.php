@@ -9,6 +9,7 @@ use App\Http\Controllers\v1\EmployeeController;
 use App\Http\Controllers\v1\OcrCategoriesController;
 use App\Http\Controllers\v1\OcrUploadController;
 use App\Http\Controllers\v1\RatesController;
+use App\Http\Controllers\v1\SalaryController;
 use App\Http\Controllers\v1\SegmentController;
 use App\Http\Controllers\v1\SiteAssignmentController;
 use App\Http\Controllers\v1\SiteExpenseCategoryController;
@@ -52,4 +53,6 @@ Route::prefix('v1')->group(function() {
     Route::get('get-attendance-employee', [AttendanceController::class, 'get_attendance_employee_by_attendance']);
     Route::post('employee-site', [SiteAssignmentController::class, 'assignedSitesEmployee']);
     Route::get('get-attendance-subcontractor', [AttendanceSubSegmentController::class, 'getAttendanceSubcontractor']);
+    Route::post('salary/calculate', [SalaryController::class, 'calculate']);
+    Route::post('salary/close', [SalaryController::class, 'close']);
 });

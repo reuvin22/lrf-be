@@ -2,72 +2,46 @@
 
 namespace App\Http\Controllers\v1;
 
-use App\Http\Controllers\Controller;
 use App\Http\Requests\v1\OcrUploadsCategoryRequest;
-use Illuminate\Http\Request;
-use App\Models\OcrUploadCategory;
-use Illuminate\Support\Facades\Validator;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Str;
 
-class OcrCategoriesController extends Controller
+class OcrCategoriesController extends SheetResourceController
 {
-    public function index()
-    {
-        $categories = OcrUploadCategory::orderBy('category_name')->get();
-        return response()->json(['data' => $categories], 200);
-    }
+    protected string $sheetName = 'OcrUploadCategories';
+    protected string $idColumn  = 'category_id';
+    protected array $headers    = [
+        'category_id', 'category_name', 'description', 'status',
+    ];
 
-    public function store(OcrUploadsCategoryRequest $request)
+    public function store(OcrUploadsCategoryRequest $request): JsonResponse
     {
-        $data = $request->validated();
+        $data                = $request->validated();
         $data['category_id'] = (string) Str::uuid();
 
-        $category = OcrUploadCategory::create($data);
-
-        return response()->json(['data' => $category], 201);
-    }
-
-    public function show($id)
-    {
-        $category = OcrUploadCategory::find($id);
-
-        if (!$category) {
-            return response()->json(['message' => 'Category not found'], 404);
-        }
-
-        return response()->json(['data' => $category], 200);
-    }
-
-    public function update(OcrUploadsCategoryRequest $request, $id)
-    {
-        $category = OcrUploadCategory::find($id);
-
-        if (!$category) {
-            return response()->json([
-                'message' => 'Category not found'
-            ], 404);
-        }
-
-        $validated = $request->validated();
-
-        $category->update($validated);
+        $this->appendRow($data);
 
         return response()->json([
-            'message' => 'Category updated successfully',
-            'data' => $category
-        ], 200);
+            'success' => true,
+            'message' => 'OCR category created successfully.',
+            'data'    => $data,
+        ], 201);
     }
 
-    public function destroy($id)
+    public function update(OcrUploadsCategoryRequest $request, string $id): JsonResponse
     {
-        $category = OcrUploadCategory::find($id);
+        $located = $this->locate($id);
+        if (!$located) return $this->notFound();
 
-        if (!$category) {
-            return response()->json(['message' => 'Category not found'], 404);
-        }
+        $data                = array_merge($located['data'], $request->validated());
+        $data['category_id'] = $id;
 
-        $category->delete();
+        $this->updateRowAt($located['rowNumber'], $data);
 
-        return response()->json(['message' => 'Category deleted successfully'], 200);
+        return response()->json([
+            'success' => true,
+            'message' => 'OCR category updated successfully.',
+            'data'    => $data,
+        ]);
     }
 }

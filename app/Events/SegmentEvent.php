@@ -36,15 +36,15 @@ class SegmentEvent implements ShouldBroadcastNow
     {
         return [
             'segment' => [
-                'segment_id' => $this->segment->segment_id,
-                'attendance_id' => $this->segment->attendance_id,
-                'type' => $this->segment->type,
-                'segment_type' => $this->segment->segment_type,
-                'site_id' => $this->segment->site_id,
-                'site_name' => $this->segment->site_name,
-                'start_time' => optional($this->segment->start_time)?->toISOString(),
-                'end_time' => optional($this->segment->end_time)?->toISOString(),
-                'action' => $this->action,
+                'segment_id'    => $this->segment->segment_id ?? null,
+                'attendance_id' => $this->segment->attendance_id ?? null,
+                'type'          => $this->segment->type ?? null,
+                'segment_type'  => $this->segment->segment_type ?? null,
+                'site_id'       => $this->segment->site_id ?? null,
+                'site_name'     => $this->segment->site_name ?? null,
+                'start_time'    => $this->segment->start_time ?? null,
+                'end_time'      => $this->segment->end_time ?? null,
+                'action'        => $this->action,
             ]
         ];
     }

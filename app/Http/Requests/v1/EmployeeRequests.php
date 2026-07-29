@@ -23,19 +23,20 @@ class EmployeeRequests extends FormRequest
     public function rules(): array
     {
         return [
-            'employee_code' => 'required|string|max:50',
+            'employee_code' => 'required_unless:status,PENDING|nullable|string|max:50',
             'name' => 'required|string|max:255',
             'name_kana' => 'nullable|string|max:255',
             'line_user_id' => 'nullable|string|max:255',
             'email' => 'nullable|email|max:255',
-            'employment_type' => 'required|string|in:FULL_TIME,PART_TIME,CONTRACT',
-            'role' => 'required|string|in:GENERAL,ADMIN,ACCOUNTING',
-            'base_salary' => 'required|integer|min:0',
-            'monthly_work_hours' => 'required|numeric|min:0',
-            'cost_rate' => 'required|integer|min:0',
+            'employment_type' => 'required_unless:status,PENDING|nullable|string|in:FULL_TIME,PART_TIME,CONTRACT',
+            'salary_type' => 'nullable|string|in:HOURLY_BASED,FIXED_PRICE_BASED',
+            'role' => 'required_unless:status,PENDING|nullable|string|in:GENERAL,ADMIN,ACCOUNTING',
+            'base_salary' => 'required_unless:status,PENDING|nullable|integer|min:0',
+            'monthly_work_hours' => 'required_unless:status,PENDING|nullable|numeric|min:0',
+            'cost_rate' => 'required_unless:status,PENDING|nullable|integer|min:0',
             'commute_cost_monthly' => 'nullable|integer|min:0',
-            'joined_date' => 'required|date',
-            'status' => 'required|string|in:ACTIVE,RESIGNED',
+            'joined_date' => 'required_unless:status,PENDING|nullable|date',
+            'status' => 'required|string|in:ACTIVE,RESIGNED,PENDING',
         ];
     }
 }

@@ -2,108 +2,66 @@
 
 namespace App\Http\Controllers\v1;
 
-use App\Http\Controllers\Controller;
 use App\Http\Requests\v1\AttendanceSubSegmentsRequest;
-use App\Http\Resources\v1\AttendanceSubcontractorSegmentResource;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use App\Models\AttendanceSubSegments;
+use Illuminate\Support\Str;
 
-class AttendanceSubSegmentController extends Controller
+class AttendanceSubSegmentController extends SheetResourceController
 {
-    public function index()
+    protected string $sheetName = 'AttendanceSubSegments';
+    protected string $idColumn  = 'uuid';
+    protected array $headers    = [
+        'uuid', 'attendance_id', 'segment_id', 'company_id', 'company_name',
+        'employee_id', 'worker_id', 'worker_name', 'site_id', 'site_name',
+        'contract_type', 'start_time', 'end_time',
+    ];
+
+    public function store(AttendanceSubSegmentsRequest $request): JsonResponse
     {
-        $data = AttendanceSubSegments::with('segments', 'worker', 'site', 'subcontractor')->get();
+        $data         = $request->validated();
+        $data['uuid'] = (string) Str::uuid();
+
+        $this->appendRow($data);
 
         return response()->json([
             'success' => true,
-            'data' => AttendanceSubcontractorSegmentResource::collection($data)
-        ]);
-    }
-
-    public function store(AttendanceSubSegmentsRequest $request)
-    {
-        $record = AttendanceSubSegments::create($request->validated());
-
-        return response()->json([
-            'success' => true,
-            'data' => $record
+            'message' => 'Attendance sub segment created successfully.',
+            'data'    => $data,
         ], 201);
     }
 
-    public function show(string $id)
+    public function update(AttendanceSubSegmentsRequest $request, string $id): JsonResponse
     {
-        $record = AttendanceSubSegments::find($id);
+        $located = $this->locate($id);
+        if (!$located) return $this->notFound();
 
-        if (!$record) {
+        $data         = array_merge($located['data'], $request->validated());
+        $data['uuid'] = $id;
+
+        $this->updateRowAt($located['rowNumber'], $data);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Attendance sub segment updated successfully.',
+            'data'    => $data,
+        ]);
+    }
+
+    public function getAttendanceSubcontractor(Request $request): JsonResponse
+    {
+        $employeeId = $request->employee_id;
+
+        if (!$employeeId) {
             return response()->json([
                 'success' => false,
-                'message' => 'Record not found'
-            ], 404);
+                'message' => 'employee_id is required.',
+            ], 400);
         }
 
         return response()->json([
             'success' => true,
-            'data' => $record
-        ]);
-    }
-
-    public function update(Request $request, string $id)
-    {
-        $record = AttendanceSubSegments::find($id);
-
-        if (!$record) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Record not found'
-            ], 404);
-        }
-
-        $validated = $request->validate([
-            'attendance_id' => 'sometimes|integer',
-            'segment_id' => 'sometimes|integer',
-            'worker_id' => 'sometimes|integer',
-            'site_id' => 'sometimes|integer',
-            'contract_type' => 'sometimes|string',
-            'start_time' => 'sometimes|date',
-            'end_time' => 'sometimes|date',
-        ]);
-
-        $record->update($validated);
-
-        return response()->json([
-            'success' => true,
-            'data' => $record
-        ]);
-    }
-
-    public function destroy(string $id)
-    {
-        $record = AttendanceSubSegments::find($id);
-
-        if (!$record) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Record not found'
-            ], 404);
-        }
-
-        $record->delete();
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Deleted successfully'
-        ]);
-    }
-
-    public function getAttendanceSubcontractor(Request $request)
-    {
-        $data = AttendanceSubSegments::with('segments', 'worker', 'site', 'subcontractor')
-            ->where('employee_id', $request->employee_id)
-            ->get();
-
-        return response()->json([
-            'success' => true,
-            'data' => AttendanceSubcontractorSegmentResource::collection($data)
+            'data'    => $this->where(['employee_id' => $employeeId]),
         ]);
     }
 }

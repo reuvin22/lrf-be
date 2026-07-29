@@ -2,79 +2,44 @@
 
 namespace App\Http\Controllers\v1;
 
-use App\Http\Controllers\Controller;
 use App\Http\Requests\v1\SystemSettingRequest;
-use App\Models\SystemSettings;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Str;
 
-class SystemSettingController extends Controller
+class SystemSettingController extends SheetResourceController
 {
-    public function index()
-    {
-        return response()->json([
-            'data' => SystemSettings::all()
-        ]);
-    }
+    protected string $sheetName = 'SystemSettings';
+    protected string $idColumn  = 'system_settings_id';
+    protected array $headers    = ['system_settings_id', 'key', 'value', 'description'];
 
-    public function store(SystemSettingRequest $request)
+    public function store(SystemSettingRequest $request): JsonResponse
     {
-        $validated = $request->validated();
-        $validated['system_settings_id'] = (string) Str::uuid();
-        $setting = SystemSettings::create($validated);
-        
+        $data                       = $request->validated();
+        $data['system_settings_id'] = (string) Str::uuid();
+
+        $this->appendRow($data);
+
         return response()->json([
-            'message' => 'Setting created successfully',
-            'data' => $setting
+            'success' => true,
+            'message' => 'System setting created successfully.',
+            'data'    => $data,
         ], 201);
     }
 
-    public function show($id)
+    public function update(SystemSettingRequest $request, string $id): JsonResponse
     {
-        $setting = SystemSettings::find($id);
+        $located = $this->locate($id);
+        if (!$located) return $this->notFound();
 
-        if (!$setting) {
-            return response()->json([
-                'message' => 'Setting not found'
-            ], 404);
-        }
+        $data                       = array_merge($located['data'], $request->validated());
+        $data['system_settings_id'] = $id;
+
+        $this->updateRowAt($located['rowNumber'], $data);
 
         return response()->json([
-            'data' => $setting
-        ]);
-    }
-
-    public function update(SystemSettingRequest $request, $id)
-    {
-        $setting = SystemSettings::find($id);
-
-        if (!$setting) {
-            return response()->json([
-                'message' => 'Setting not found'
-            ], 404);
-        }
-
-        $setting->update($request->validated());
-
-        return response()->json([
-            'message' => 'Setting updated successfully',
-            'data' => $setting
-        ]);
-    }
-
-    public function destroy($id)
-    {
-        $setting = SystemSettings::find($id);
-
-        if (!$setting) {
-            return response()->json([
-                'message' => 'Setting not found'
-            ], 404);
-        }
-
-        $setting->delete();
-
-        return response()->json([
-            'message' => 'Setting deleted successfully'
+            'success' => true,
+            'message' => 'System setting updated successfully.',
+            'data'    => $data,
         ]);
     }
 }

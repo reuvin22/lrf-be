@@ -23,14 +23,14 @@ class AttendanceSubSegmentsRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'attendance_id' => 'required|uuid',
-            'segment_id' => 'required|uuid',
-            'company_id' => 'required|uuid|max:50',
+            'attendance_id' => 'required|string',
+            'segment_id' => 'nullable|string',
+            'company_id' => 'required|string|max:50',
             'company_name' => 'required|string|max:255',
-            'employee_id' => 'required|uuid',
-            'worker_id' => 'required|uuid',
+            'employee_id' => 'required|string',
+            'worker_id' => 'required|string',
             'worker_name' => 'nullable|string|max:255',
-            'site_id' => 'required|uuid',
+            'site_id' => 'required|string',
             'site_name' => 'required|string|max:255',
             'contract_type' => 'required|string|max:100',
             'start_time' => 'required|date',

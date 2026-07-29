@@ -2,98 +2,44 @@
 
 namespace App\Http\Controllers\v1;
 
-use App\Http\Controllers\Controller;
 use App\Http\Requests\v1\CompanyCalendarRequest;
-use App\Models\CompanyCalendar;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Str;
 
-class CompanyCalendarController extends Controller
+class CompanyCalendarController extends SheetResourceController
 {
-    /**
-     * List all calendar entries
-     */
-    public function index()
+    protected string $sheetName = 'CompanyCalendar';
+    protected string $idColumn  = 'calendar_id';
+    protected array $headers    = ['calendar_id', 'date', 'day_type', 'note'];
+
+    public function store(CompanyCalendarRequest $request): JsonResponse
     {
-        $data = CompanyCalendar::orderBy('date', 'asc')->get();
+        $data                = $request->validated();
+        $data['calendar_id'] = (string) Str::uuid();
+
+        $this->appendRow($data);
 
         return response()->json([
-            'data' => $data
-        ]);
-    }
-
-    /**
-     * Store new entry
-     */
-    public function store(CompanyCalendarRequest $request)
-    {
-        $validated = $request->validated();
-
-        $validated['calendar_id'] = (string) Str::uuid();
-
-        $calendar = CompanyCalendar::create($validated);
-
-        return response()->json([
-            'message' => 'Calendar created successfully',
-            'data' => $calendar
+            'success' => true,
+            'message' => 'Calendar entry created successfully.',
+            'data'    => $data,
         ], 201);
     }
 
-    /**
-     * Show single entry
-     */
-    public function show(string $id)
+    public function update(CompanyCalendarRequest $request, string $id): JsonResponse
     {
-        $calendar = CompanyCalendar::find($id);
+        $located = $this->locate($id);
+        if (!$located) return $this->notFound();
 
-        if (!$calendar) {
-            return response()->json([
-                'message' => 'Calendar not found'
-            ], 404);
-        }
+        $data                = array_merge($located['data'], $request->validated());
+        $data['calendar_id'] = $id;
+
+        $this->updateRowAt($located['rowNumber'], $data);
 
         return response()->json([
-            'data' => $calendar
-        ]);
-    }
-
-    /**
-     * Update entry
-     */
-    public function update(CompanyCalendarRequest $request, string $id)
-    {
-        $calendar = CompanyCalendar::find($id);
-
-        if (!$calendar) {
-            return response()->json([
-                'message' => 'Calendar not found'
-            ], 404);
-        }
-
-        $calendar->update($request->validated());
-
-        return response()->json([
-            'message' => 'Calendar updated successfully',
-            'data' => $calendar
-        ]);
-    }
-
-    /**
-     * Delete entry
-     */
-    public function destroy(string $id)
-    {
-        $calendar = CompanyCalendar::find($id);
-
-        if (!$calendar) {
-            return response()->json([
-                'message' => 'Calendar not found'
-            ], 404);
-        }
-
-        $calendar->delete();
-
-        return response()->json([
-            'message' => 'Calendar deleted successfully'
+            'success' => true,
+            'message' => 'Calendar entry updated successfully.',
+            'data'    => $data,
         ]);
     }
 }

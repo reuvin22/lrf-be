@@ -2,107 +2,47 @@
 
 namespace App\Http\Controllers\v1;
 
-use App\Http\Controllers\Controller;
-use Illuminate\Http\Request;
-use App\Models\SubContractorReport;
+use App\Http\Requests\v1\SubContractorReportRequest;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Str;
 
-class SubContractorReportController extends Controller
+class SubContractorReportController extends SheetResourceController
 {
-    public function index()
+    protected string $sheetName = 'SubContractorReports';
+    protected string $idColumn  = 'uuid';
+    protected array $headers    = [
+        'uuid', 'attendance_id', 'employee_id', 'worker_id', 'worker_name',
+        'contract_type', 'company_name', 'site_id', 'start_time', 'end_time',
+    ];
+
+    public function store(SubContractorReportRequest $request): JsonResponse
     {
-        $reports = SubContractorReport::all();
+        $data         = $request->validated();
+        $data['uuid'] = (string) Str::uuid();
+
+        $this->appendRow($data);
 
         return response()->json([
             'success' => true,
-            'data' => $reports
-        ]);
-    }
-
-    public function store(Request $request)
-    {
-        $validated = $request->validate([
-            'attendance_id' => 'required|integer',
-            'employee_id' => 'required|integer',
-            'worker_id' => 'nullable|integer',
-            'worker_name' => 'required|string|max:255',
-            'contract_type' => 'required|string|max:255',
-            'company_name' => 'required|string|max:255',
-            'site_id' => 'required|integer|max:255',
-            'start_time' => 'required|date',
-            'end_time' => 'required|date',
-        ]);
-
-        $report = SubContractorReport::create($validated);
-
-        return response()->json([
-            'success' => true,
-            'data' => $report
+            'message' => 'Subcontractor report created successfully.',
+            'data'    => $data,
         ], 201);
     }
 
-    public function show(string $id)
+    public function update(SubContractorReportRequest $request, string $id): JsonResponse
     {
-        $report = SubContractorReport::find($id);
+        $located = $this->locate($id);
+        if (!$located) return $this->notFound();
 
-        if (!$report) {
-            return response()->json([
-                'success' => false,
-                'message' => 'SubContractorReport not found'
-            ], 404);
-        }
+        $data         = array_merge($located['data'], $request->validated());
+        $data['uuid'] = $id;
+
+        $this->updateRowAt($located['rowNumber'], $data);
 
         return response()->json([
             'success' => true,
-            'data' => $report
-        ]);
-    }
-
-    public function update(Request $request, string $id)
-    {
-        $report = SubContractorReport::find($id);
-
-        if (!$report) {
-            return response()->json([
-                'success' => false,
-                'message' => 'SubContractorReport not found'
-            ], 404);
-        }
-
-        $validated = $request->validate([
-            'attendance_id' => 'sometimes|integer',
-            'worker_id' => 'sometimes|integer',
-            'worker_name' => 'sometimes|string|max:255',
-            'contract_type' => 'sometimes|string|max:255',
-            'company_name' => 'sometimes|string|max:255',
-            'site_id' => 'sometimes|string|max:255',
-            'start_time' => 'sometimes|date',
-            'end_time' => 'nullable|date',
-        ]);
-
-        $report->update($validated);
-
-        return response()->json([
-            'success' => true,
-            'data' => $report
-        ]);
-    }
-
-    public function destroy(string $id)
-    {
-        $report = SubContractorReport::find($id);
-
-        if (!$report) {
-            return response()->json([
-                'success' => false,
-                'message' => 'SubContractorReport not found'
-            ], 404);
-        }
-
-        $report->delete();
-
-        return response()->json([
-            'success' => true,
-            'message' => 'SubContractorReport deleted successfully'
+            'message' => 'Subcontractor report updated successfully.',
+            'data'    => $data,
         ]);
     }
 }

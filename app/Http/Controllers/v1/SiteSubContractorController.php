@@ -2,66 +2,72 @@
 
 namespace App\Http\Controllers\v1;
 
-use App\Http\Controllers\Controller;
 use App\Http\Requests\v1\SiteSubContractorRequest;
-use App\Http\Resources\v1\SiteSubContractorResource;
-use App\Models\SiteSubContractors;
-use App\Models\SubContractors;
-use App\Models\v1\SiteSubContractor;
-use Illuminate\Http\Request;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Str;
 
-class SiteSubContractorController extends Controller
+class SiteSubContractorController extends SheetResourceController
 {
-    public function index()
+    protected string $sheetName = 'SiteSubContractors';
+    protected string $idColumn  = 'uuid';
+    protected array $headers    = [
+        'uuid', 'site_id', 'site_name', 'subcontractor_id', 'subcontractor_name', 'contract_type',
+    ];
+
+    public function store(SiteSubContractorRequest $request): JsonResponse
     {
-        $siteSubContractors = SiteSubContractors::with([
-            'site',
-            'subcontractor'
-        ])->latest()->get();
+        $data         = $this->withNames($request->validated());
+        $data['uuid'] = (string) Str::uuid();
+
+        $this->appendRow($data);
 
         return response()->json([
             'success' => true,
-            'data' => SiteSubContractorResource::collection($siteSubContractors)
-        ]);
-    }
-
-    public function store(SiteSubContractorRequest $request)
-    {
-        $data = SiteSubContractors::create($request->validated());
-
-        return response()->json([
-            'message' => 'Site subcontractor created successfully',
-            'data' => $data
+            'message' => 'Site subcontractor created successfully.',
+            'data'    => $data,
         ], 201);
     }
 
-    public function show(string $id)
+    public function update(SiteSubContractorRequest $request, string $id): JsonResponse
     {
-        $data = SiteSubContractors::findOrFail($id);
+        $located = $this->locate($id);
+        if (!$located) return $this->notFound();
 
-        return response()->json($data);
-    }
+        $data         = array_merge($located['data'], $this->withNames($request->validated()));
+        $data['uuid'] = $id;
 
-    public function update(SiteSubContractorRequest $request, string $id)
-    {
-        $data = SiteSubContractors::findOrFail($id);
-
-        $data->update($request->validated());
+        $this->updateRowAt($located['rowNumber'], $data);
 
         return response()->json([
-            'message' => 'Site subcontractor updated successfully',
-            'data' => $data
+            'success' => true,
+            'message' => 'Site subcontractor updated successfully.',
+            'data'    => $data,
         ]);
     }
 
-    public function destroy(string $id)
+    /**
+     * Resolve the display names from their ids so the sheet's site_name /
+     * subcontractor_name columns are populated for API-created rows too (the
+     * Apps Script fills them for rows entered manually in the sheet).
+     */
+    private function withNames(array $data): array
     {
-        $data = SiteSubContractors::findOrFail($id);
+        if (!empty($data['site_id'])) {
+            $data['site_name'] = $this->lookupName('ConstructionSites', 'site_id', $data['site_id'], 'site_name');
+        }
 
-        $data->delete();
+        if (!empty($data['subcontractor_id'])) {
+            $data['subcontractor_name'] = $this->lookupName('SubContractors', 'subcontractor_id', $data['subcontractor_id'], 'company_name');
+        }
 
-        return response()->json([
-            'message' => 'Site subcontractor deleted successfully'
-        ]);
+        return $data;
+    }
+
+    private function lookupName(string $tab, string $idColumn, string $idValue, string $nameColumn): string
+    {
+        $row = collect($this->sheet->getRowsAsAssoc($this->spreadsheetId(), $tab))
+            ->firstWhere($idColumn, $idValue);
+
+        return (string) ($row[$nameColumn] ?? '');
     }
 }

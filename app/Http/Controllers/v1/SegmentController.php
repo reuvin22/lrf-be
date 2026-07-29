@@ -3,133 +3,78 @@
 namespace App\Http\Controllers\v1;
 
 use App\Events\SegmentEvent;
-use App\Http\Controllers\Controller;
 use App\Http\Requests\v1\SegmentRequests;
-use App\Models\Segment;
 use Carbon\Carbon;
-use Illuminate\Support\Facades\Log;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Str;
 
-class SegmentController extends Controller
+class SegmentController extends SheetResourceController
 {
-    public function index()
+    protected string $sheetName = 'Segments';
+    protected string $idColumn  = 'segment_id';
+    protected array $headers    = [
+        'segment_id', 'attendance_id', 'employee_id', 'site_id',
+        'segment_type', 'site_name', 'start_time', 'end_time', 'type',
+    ];
+
+    public function store(SegmentRequests $request): JsonResponse
     {
-        $segments = Segment::latest()->get()->map(function ($segment) {
-            return $this->formatSegment($segment);
-        });
+        $data               = $request->validated();
+        $data['segment_id'] = (string) Str::uuid();
+        $data               = $this->normalizeTimes($data);
+
+        $this->appendRow($data);
+        event(new SegmentEvent((object) $data, 'created'));
 
         return response()->json([
             'success' => true,
-            'data' => $segments
-        ]);
-    }
-
-    public function store(SegmentRequests $request)
-    {
-        $validated = $request->validated();
-        Log::info('payload', ['payload' => $validated]);
-        if (!empty($validated['start_time'])) {
-            $validated['start_time'] = Carbon::parse($validated['start_time'])->utc();
-        }
-
-        if (!empty($validated['end_time'])) {
-            $validated['end_time'] = Carbon::parse($validated['end_time'])->utc();
-        }
-
-        $segment = Segment::create($validated);
-        event(new SegmentEvent($segment, 'created'));
-        return response()->json([
-            'success' => true,
-            'message' => 'Segment created successfully',
-            'data' => $segment
+            'message' => 'Segment created successfully.',
+            'data'    => $data,
         ], 201);
     }
 
-    public function show(string $id)
+    public function update(SegmentRequests $request, string $id): JsonResponse
     {
-        $segment = Segment::find($id);
+        $located = $this->locate($id);
+        if (!$located) return $this->notFound();
 
-        if (!$segment) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Segment not found'
-            ], 404);
-        }
+        $data               = array_merge($located['data'], $this->normalizeTimes($request->validated()));
+        $data['segment_id'] = $id;
+
+        $this->updateRowAt($located['rowNumber'], $data);
+        event(new SegmentEvent((object) $data, 'update'));
 
         return response()->json([
             'success' => true,
-            'data' => $segment
+            'message' => 'Segment updated successfully.',
+            'data'    => $data,
         ]);
     }
 
-    public function update(SegmentRequests $request, string $id)
+    public function destroy(\Illuminate\Http\Request $request, ?string $id = null): JsonResponse
     {
-        $segment = Segment::find($id);
+        if ($id === null) return $this->notFound('Id is required.');
 
-        if (!$segment) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Segment not found'
-            ], 404);
-        }
-        $validated = $request->validated();
+        $located = $this->locate($id);
+        if (!$located) return $this->notFound();
 
-        if (!empty($validated['start_time'])) {
-            $validated['start_time'] = Carbon::parse($validated['start_time'])->utc();
-        }
+        $this->deleteRowAt($located['rowNumber']);
+        event(new SegmentEvent((object) $located['data'], 'deleted'));
 
-        if (!empty($validated['end_time'])) {
-            $validated['end_time'] = Carbon::parse($validated['end_time'])->utc();
-        }
-
-        $segment->update($validated);
-        event(new SegmentEvent($segment, 'update'));
         return response()->json([
             'success' => true,
-            'message' => 'Segment updated successfully',
-            'data' => $segment
+            'message' => 'Segment deleted successfully.',
         ]);
     }
 
-    public function destroy(string $id)
+    private function normalizeTimes(array $data): array
     {
-        $segment = Segment::find($id);
-
-        if (!$segment) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Segment not found'
-            ], 404);
+        if (!empty($data['start_time'])) {
+            $data['start_time'] = Carbon::parse($data['start_time'])->utc()->toIso8601String();
         }
-
-        $segment->delete();
-        event(new SegmentEvent($segment, 'deleted'));
-        return response()->json([
-            'success' => true,
-            'message' => 'Segment deleted successfully'
-        ]);
-    }
-
-    private function formatSegment($segment)
-    {
-        return [
-            'segment_id' => $segment->segment_id,
-            'attendance_id' => $segment->attendance_id,
-            'type' => $segment->type,
-            'segment_type' => $segment->segment_type,
-            'site_id' => $segment->site_id,
-            'site_name' => $segment->site_name,
-
-            'start_time' => $segment->start_time
-                ? $segment->start_time->toISOString()
-                : null,
-
-            'end_time' => $segment->end_time
-                ? $segment->end_time->toISOString()
-                : null,
-
-            'created_at' => $segment->created_at,
-            'updated_at' => $segment->updated_at,
-        ];
+        if (!empty($data['end_time'])) {
+            $data['end_time'] = Carbon::parse($data['end_time'])->utc()->toIso8601String();
+        }
+        return $data;
     }
 }

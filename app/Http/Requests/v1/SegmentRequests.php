@@ -39,7 +39,6 @@ class SegmentRequests extends FormRequest
     public function rules(): array
     {
         return [
-            'segment_id' => 'required|uuid',
             'attendance_id' => 'required|uuid',
             'employee_id' => 'required|uuid',
             'site_id' => 'nullable|uuid',

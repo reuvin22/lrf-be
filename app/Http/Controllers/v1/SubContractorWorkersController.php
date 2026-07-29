@@ -2,73 +2,62 @@
 
 namespace App\Http\Controllers\v1;
 
-use App\Http\Controllers\Controller;
 use App\Http\Requests\v1\SubContractorWorkerRequest;
-use App\Models\SubContractorsWorkers;
-use App\Models\SubContractorWorker;
-use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Validator;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Log;
 
-class SubContractorWorkersController extends Controller
+class SubContractorWorkersController extends SheetResourceController
 {
-    public function index()
-    {
-        $workers = SubContractorsWorkers::all();
-        return response()->json(['data' => $workers]);
-    }
+    protected string $sheetName = 'SubContractorWorkers';
+    protected string $idColumn  = 'worker_id';
+    protected array $headers    = [
+        'worker_id', 'subcontractor_id', 'subcontractor_name', 'name', 'name_kana', 'status',
+    ];
 
-    public function store(SubContractorWorkerRequest $request)
+    public function store(SubContractorWorkerRequest $request): JsonResponse
     {
-        $data = $request->validated();
-        $data['worker_id'] = Str::uuid();
-        $worker = SubContractorsWorkers::create($data);
+        $data                       = $request->validated();
+        $data['worker_id']          = (string) Str::uuid();
+        $data['subcontractor_name'] = $this->lookupSubcontractorName($data['subcontractor_id'] ?? null);
 
+        $this->appendRow($data);
+        Log::info('THIS IS DATA: ', ['data' => $data]);
         return response()->json([
-            'message' => 'Worker created successfully',
-            'data' => $worker,
+            'success' => true,
+            'message' => 'Worker created successfully.',
+            'data'    => $data,
         ], 201);
     }
 
-    public function show($id)
+    public function update(SubContractorWorkerRequest $request, string $id): JsonResponse
     {
-        $worker = SubContractorsWorkers::find($id);
+        $located = $this->locate($id);
+        if (!$located) return $this->notFound();
 
-        if (!$worker) {
-            return response()->json(['message' => 'Worker not found'], 404);
+        $data              = array_merge($located['data'], $request->validated());
+        $data['worker_id'] = $id;
+
+        if (array_key_exists('subcontractor_id', $request->validated())) {
+            $data['subcontractor_name'] = $this->lookupSubcontractorName($data['subcontractor_id'] ?? null);
         }
 
-        return response()->json(['data' => $worker]);
-    }
-
-    public function update(SubContractorWorkerRequest $request, $id)
-    {
-        $worker = SubContractorsWorkers::find($id);
-
-        if (!$worker) {
-            return response()->json(['message' => 'Worker not found'], 404);
-        }
-
-        $validated = $request->validated();
-
-        $worker->update($validated);
-
+        $this->updateRowAt($located['rowNumber'], $data);
+        Log::info('THIS IS DATA: ', ['data' => $data]);
         return response()->json([
-            'message' => 'Worker updated successfully',
-            'data' => $worker,
+            'success' => true,
+            'message' => 'Worker updated successfully.',
+            'data'    => $data,
         ]);
     }
 
-    public function destroy($id)
+    private function lookupSubcontractorName(?string $subcontractorId): string
     {
-        $worker = SubContractorsWorkers::find($id);
+        if (!$subcontractorId) return '';
 
-        if (!$worker) {
-            return response()->json(['message' => 'Worker not found'], 404);
-        }
+        $row = collect($this->sheet->getRowsAsAssoc($this->spreadsheetId(), 'SubContractors'))
+            ->firstWhere('subcontractor_id', $subcontractorId);
 
-        $worker->delete();
-
-        return response()->json(['message' => 'Worker deleted successfully']);
+        return $row['company_name'] ?? '';
     }
 }

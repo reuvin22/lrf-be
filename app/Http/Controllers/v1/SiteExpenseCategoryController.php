@@ -2,96 +2,44 @@
 
 namespace App\Http\Controllers\v1;
 
-use App\Http\Controllers\Controller;
 use App\Http\Requests\v1\SiteExpenseCategoryRequest;
-use App\Models\SiteExpenseCategory;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Str;
 
-class SiteExpenseCategoryController extends Controller
+class SiteExpenseCategoryController extends SheetResourceController
 {
-    /**
-     * List all categories
-     */
-    public function index()
+    protected string $sheetName = 'SiteExpenseCategories';
+    protected string $idColumn  = 'category_id';
+    protected array $headers    = ['category_id', 'category_name', 'description', 'status'];
+
+    public function store(SiteExpenseCategoryRequest $request): JsonResponse
     {
-        $categories = SiteExpenseCategory::latest()->get();
+        $data                = $request->validated();
+        $data['category_id'] = (string) Str::uuid();
+
+        $this->appendRow($data);
 
         return response()->json([
-            'data' => $categories
-        ]);
-    }
-
-    /**
-     * Store new category
-     */
-    public function store(SiteExpenseCategoryRequest $request)
-    {
-        $validated = $request->validated();
-        $validated['category_id'] = (string) Str::uuid();
-        $category = SiteExpenseCategory::create($validated);
-
-        return response()->json([
-            'message' => 'Category created successfully',
-            'data' => $category
+            'success' => true,
+            'message' => 'Site expense category created successfully.',
+            'data'    => $data,
         ], 201);
     }
 
-    /**
-     * Show single category
-     */
-    public function show(string $id)
+    public function update(SiteExpenseCategoryRequest $request, string $id): JsonResponse
     {
-        $category = SiteExpenseCategory::find($id);
+        $located = $this->locate($id);
+        if (!$located) return $this->notFound();
 
-        if (!$category) {
-            return response()->json([
-                'message' => 'Category not found'
-            ], 404);
-        }
+        $data                = array_merge($located['data'], $request->validated());
+        $data['category_id'] = $id;
+
+        $this->updateRowAt($located['rowNumber'], $data);
 
         return response()->json([
-            'data' => $category
-        ]);
-    }
-
-    /**
-     * Update category
-     */
-    public function update(SiteExpenseCategoryRequest $request, string $id)
-    {
-        $category = SiteExpenseCategory::find($id);
-
-        if (!$category) {
-            return response()->json([
-                'message' => 'Category not found'
-            ], 404);
-        }
-
-        $category->update($request->validated());
-
-        return response()->json([
-            'message' => 'Category updated successfully',
-            'data' => $category
-        ]);
-    }
-
-    /**
-     * Delete category
-     */
-    public function destroy(string $id)
-    {
-        $category = SiteExpenseCategory::find($id);
-
-        if (!$category) {
-            return response()->json([
-                'message' => 'Category not found'
-            ], 404);
-        }
-
-        $category->delete();
-
-        return response()->json([
-            'message' => 'Category deleted successfully'
+            'success' => true,
+            'message' => 'Site expense category updated successfully.',
+            'data'    => $data,
         ]);
     }
 }

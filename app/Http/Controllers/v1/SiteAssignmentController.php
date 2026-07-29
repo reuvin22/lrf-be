@@ -2,87 +2,58 @@
 
 namespace App\Http\Controllers\v1;
 
-use App\Http\Controllers\Controller;
 use App\Http\Requests\v1\SiteAssignmentRequest;
-use App\Http\Resources\v1\SiteAssignmentResource;
-use App\Models\SiteAssignment;
-use App\Models\SiteAssignments;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 
-class SiteAssignmentController extends Controller
+class SiteAssignmentController extends SheetResourceController
 {
-    public function index()
-    {
-        $assignments = SiteAssignments::with(['employee', 'site'])
-            ->orderBy('assignment_id', 'desc')
-            ->get();
+    protected string $sheetName = 'SiteAssignments';
+    protected string $idColumn  = 'assignment_id';
+    protected array $headers    = [
+        'assignment_id', 'worker_id', 'worker_name', 'site_id', 'site_name',
+        'is_leader', 'start_date', 'end_date',
+    ];
 
-        return SiteAssignmentResource::collection($assignments);
-    }
-
-    public function store(SiteAssignmentRequest $request)
+    public function store(SiteAssignmentRequest $request): JsonResponse
     {
-        $validated = $request->validated();
-        $validated['assignment_id'] = (string) Str::uuid();
-        $siteAssignment = SiteAssignments::create($validated);
+        $data                  = $request->validated();
+        $data['assignment_id'] = (string) Str::uuid();
+
+        $this->appendRow($data);
 
         return response()->json([
-            'message' => 'Site assignment created successfully',
-            'data' => $siteAssignment
+            'success' => true,
+            'message' => 'Site assignment created successfully.',
+            'data'    => $data,
         ], 201);
     }
 
-    public function show(string $id)
+    public function update(SiteAssignmentRequest $request, string $id): JsonResponse
     {
-        $siteAssignment = SiteAssignments::findOrFail($id);
+        $located = $this->locate($id);
+        if (!$located) return $this->notFound();
 
-        return response()->json($siteAssignment);
-    }
+        $data                  = array_merge($located['data'], $request->validated());
+        $data['assignment_id'] = $id;
 
-    public function update(SiteAssignmentRequest $request, string $id)
-    {
-        $siteAssignment = SiteAssignments::findOrFail($id);
-
-        $siteAssignment->update([
-            'employee_id' => $request->employee_id,
-            'site_id' => $request->site_id,
-            'is_leader' => $request->is_leader ?? false,
-            'start_date' => $request->start_date,
-            'end_date' => $request->end_date,
-        ]);
+        $this->updateRowAt($located['rowNumber'], $data);
 
         return response()->json([
-            'message' => 'Site assignment updated successfully',
-            'data' => $siteAssignment
+            'success' => true,
+            'message' => 'Site assignment updated successfully.',
+            'data'    => $data,
         ]);
     }
 
-    public function destroy(string $id)
+    public function assignedSitesEmployee(Request $request): JsonResponse
     {
-        $siteAssignment = SiteAssignments::findOrFail($id);
-        $siteAssignment->delete();
+        $request->validate(['employee_id' => 'required|uuid']);
 
         return response()->json([
-            'message' => 'Site assignment deleted successfully'
-        ]);
-    }
-
-    public function assignedSitesEmployee(Request $request)
-    {
-        $request->validate([
-            'employee_id' => 'required|integer|exists:employees,employee_id',
-        ]);
-
-        $employeeId = $request->input('employee_id');
-        $assignments = SiteAssignments::with(['employee', 'site'])
-            ->where('employee_id', $employeeId)
-            ->orderBy('assignment_id', 'desc')
-            ->get();
-
-        return response()->json([
-            'message' => 'Assigned sites retrieved successfully',
-            'data' => SiteAssignmentResource::collection($assignments),
+            'success' => true,
+            'data'    => $this->where(['worker_id' => $request->employee_id]),
         ]);
     }
 }

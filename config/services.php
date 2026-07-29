@@ -36,7 +36,21 @@ return [
     ],
 
     'firebase' => [
-        'credentials' => storage_path('app/lrf.json'),
+        'credentials' => storage_path('app/lrfsystem-98c20-firebase-adminsdk-fbsvc-7e61616c35.json'),
         'storage_bucket' => env('FIREBASE_STORAGE_BUCKET'),
+    ],
+
+    'google_sheets' => [
+        'credentials'      => storage_path('app/' . env('GOOGLE_SHEETS_CREDENTIALS_FILE', 'google-sheets.json')),
+        'application_name' => env('GOOGLE_SHEETS_APPLICATION_NAME', 'LRF App'),
+        'spreadsheet_id'   => env('GOOGLE_ID'),
+    ],
+
+    'google_vision' => [
+        'enabled'     => env('GOOGLE_VISION_ENABLED', false),
+        'credentials' => storage_path('app/' . env(
+            'GOOGLE_SHEETS_CREDENTIALS_FILE',
+            env('GOOGLE_SHEETS_CREDENTIALS_FILE', 'google-sheets.json')
+        )),
     ],
 ];
