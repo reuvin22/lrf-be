@@ -41,16 +41,13 @@ return [
     ],
 
     'google_sheets' => [
-        'credentials'      => storage_path('app/' . env('GOOGLE_SHEETS_CREDENTIALS_FILE', 'google-sheets.json')),
+        'credentials' => env('GOOGLE_SHEETS_CREDENTIALS_FILE', storage_path('app/google-sheets.json')),
         'application_name' => env('GOOGLE_SHEETS_APPLICATION_NAME', 'LRF App'),
-        'spreadsheet_id'   => env('GOOGLE_ID'),
+        'spreadsheet_id' => env('GOOGLE_ID'),
     ],
 
     'google_vision' => [
-        'enabled'     => env('GOOGLE_VISION_ENABLED', false),
-        'credentials' => storage_path('app/' . env(
-            'GOOGLE_SHEETS_CREDENTIALS_FILE',
-            env('GOOGLE_SHEETS_CREDENTIALS_FILE', 'google-sheets.json')
-        )),
+        'enabled' => env('GOOGLE_VISION_ENABLED', false),
+        'credentials' => env('GOOGLE_SHEETS_CREDENTIALS_FILE', storage_path('app/google-sheets.json')),
     ],
 ];
