@@ -4,6 +4,7 @@ namespace App\Http\Controllers\v1;
 
 use App\Http\Requests\v1\SubContractorRequest;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 
 class SubContractorController extends SheetResourceController
@@ -13,6 +14,17 @@ class SubContractorController extends SheetResourceController
     protected array $headers    = [
         'subcontractor_id', 'company_name', 'contact_person', 'contact_phone', 'status',
     ];
+
+    public function index(Request $request): JsonResponse
+    {
+        $rows = $this->all();
+
+        if ($request->boolean('approved')) {
+            $rows = array_values(array_filter($rows, fn ($row) => ($row['status'] ?? '') === 'ACTIVE'));
+        }
+
+        return response()->json(['success' => true, 'data' => $rows]);
+    }
 
     public function store(SubContractorRequest $request): JsonResponse
     {

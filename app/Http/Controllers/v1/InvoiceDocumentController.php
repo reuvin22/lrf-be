@@ -44,6 +44,15 @@ class InvoiceDocumentController extends SheetResourceController
     public function index(Request $request): JsonResponse
     {
         $rows = $this->all();
+
+        if ($status = $request->query('status')) {
+            $rows = array_values(array_filter($rows, fn ($row) => ($row['status'] ?? '') === $status));
+        }
+
+        if ($uploadedBy = $request->query('uploaded_by')) {
+            $rows = array_values(array_filter($rows, fn ($row) => ($row['uploaded_by'] ?? '') === $uploadedBy));
+        }
+
         usort($rows, fn ($a, $b) => strcmp((string) ($b['uploaded_at'] ?? ''), (string) ($a['uploaded_at'] ?? '')));
 
         $linesByDocument = [];

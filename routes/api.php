@@ -7,6 +7,7 @@ use App\Http\Controllers\v1\ConstructionSitesController;
 use App\Http\Controllers\v1\DayTypeController;
 use App\Http\Controllers\v1\EmployeeController;
 use App\Http\Controllers\v1\InvoiceDocumentController;
+use App\Http\Controllers\v1\InvoiceSummaryController;
 use App\Http\Controllers\v1\OcrCategoriesController;
 use App\Http\Controllers\v1\OcrUploadController;
 use App\Http\Controllers\v1\RatesController;
@@ -45,6 +46,8 @@ Route::prefix('v1')->group(function () {
     Route::resource('ocr-uploads', OcrUploadController::class);
     Route::patch('invoice-documents/{id}/confirm', [InvoiceDocumentController::class, 'confirm']);
     Route::resource('invoice-documents', InvoiceDocumentController::class);
+    Route::get('invoice-summary/sites/{site_id}', [InvoiceSummaryController::class, 'sites']);
+    Route::get('invoice-summary', [InvoiceSummaryController::class, 'index']);
     Route::resource('rates', RatesController::class);
     Route::resource('company-calendar', CompanyCalendarController::class);
     Route::resource('day-types', DayTypeController::class);
