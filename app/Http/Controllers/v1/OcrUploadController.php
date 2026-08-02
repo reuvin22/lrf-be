@@ -4,12 +4,13 @@ namespace App\Http\Controllers\v1;
 
 use App\Http\Requests\v1\OcrUploadRequest;
 use App\Http\Requests\v1\OcrUploadReviewRequest;
+use App\Services\AnthropicVisionService;
 use App\Services\FirebaseService;
-use App\Services\GoogleVisionService;
 use Carbon\Carbon;
 use Google\Cloud\Storage\Bucket;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
@@ -26,6 +27,26 @@ class OcrUploadController extends SheetResourceController
         'uploaded_at', 'processed_at',
     ];
 
+    private const ALLOWED_MIME_TYPES = [
+        'image/jpeg',
+        'image/png',
+        'application/pdf',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // .docx
+        'application/vnd.ms-excel', // legacy .xls
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // .xlsx
+        'text/csv',
+    ];
+
+    // Claude's vision API only accepts images and PDFs as attachments — these
+    // mime types have their text extracted server-side instead and sent as a
+    // plain text block (see buildVisionFile()).
+    private const TEXT_EXTRACTED_MIME_TYPES = [
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'application/vnd.ms-excel',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'text/csv',
+    ];
+
     public function index(Request $request): JsonResponse
     {
         $rows = $this->all();
@@ -34,25 +55,27 @@ class OcrUploadController extends SheetResourceController
         return response()->json(['success' => true, 'data' => $rows]);
     }
 
-    public function store(OcrUploadRequest $request, FirebaseService $firebase, GoogleVisionService $vision): JsonResponse
+    public function store(OcrUploadRequest $request, FirebaseService $firebase, AnthropicVisionService $vision): JsonResponse
     {
         $data              = $request->validated();
         $data['upload_id'] = (string) Str::uuid();
-        $images            = $this->collectNewImages($data);
-        $imagePaths        = [];
+        $rawImages         = $this->collectNewImages($data);
+        $visionFiles       = [];
 
-        if (!empty($images)) {
-            $imagePaths = $this->uploadImages($firebase, $images, $data['uploaded_by'] ?? 'unknown');
-            if ($imagePaths instanceof JsonResponse) return $imagePaths;
-            $data['image_path'] = $this->normalizePaths($imagePaths);
+        if (!empty($rawImages)) {
+            $result = $this->processNewImages($firebase, $rawImages, $data['uploaded_by'] ?? 'unknown');
+            if ($result instanceof JsonResponse) return $result;
+
+            $data['image_path'] = $this->normalizePaths($result['paths']);
+            $visionFiles = $result['files'];
         }
 
         unset($data['image_base64'], $data['images_base64'], $data['previous_image_paths'], $data['use_vision']);
 
-        // Write the row as PROCESSING before calling Vision, then update it
+        // Write the row as PROCESSING before calling the LLM, then update it
         // once extraction finishes, so other clients polling the list see the
         // in-progress state rather than the row appearing only after OCR completes.
-        $runsVision = !empty($imagePaths) && $vision->isEnabled();
+        $runsVision = !empty($visionFiles) && $vision->isEnabled();
         if ($runsVision) {
             $data['status'] = 'PROCESSING';
         }
@@ -62,7 +85,7 @@ class OcrUploadController extends SheetResourceController
 
         if ($runsVision) {
             $located = $this->locate($data['upload_id']);
-            $data    = array_merge($data, $this->runVisionOcr($vision, $imagePaths));
+            $data    = array_merge($data, $this->extractOcr($vision, $visionFiles));
             $data    = $this->resolveNames($data);
 
             if ($located) {
@@ -77,7 +100,7 @@ class OcrUploadController extends SheetResourceController
         ], 201);
     }
 
-    public function update(OcrUploadRequest $request, string $id, FirebaseService $firebase, GoogleVisionService $vision): JsonResponse
+    public function update(OcrUploadRequest $request, string $id, FirebaseService $firebase, AnthropicVisionService $vision): JsonResponse
     {
         $located = $this->locate($id);
         if (!$located) return $this->notFound();
@@ -93,22 +116,26 @@ class OcrUploadController extends SheetResourceController
         // by the user and must be deleted from Firebase.
         $touchesImages = array_key_exists('images_base64', $data) || array_key_exists('previous_image_paths', $data);
         $finalPaths    = [];
+        $visionFiles   = [];
 
         try {
             if ($touchesImages) {
-                $newImages = $this->collectNewImages($data);
+                $rawImages = $this->collectNewImages($data);
                 $keepPaths = array_values(array_filter((array) ($data['previous_image_paths'] ?? [])));
                 $existingPaths = $this->resolvePaths($existing['image_path'] ?? null);
 
                 $this->deleteStoredImages($bucket, array_diff($existingPaths, $keepPaths));
 
-                $uploadedPaths = [];
-                if (!empty($newImages)) {
-                    $uploadedPaths = $this->uploadImages($firebase, $newImages, $data['uploaded_by'] ?? ($existing['uploaded_by'] ?? 'unknown'));
-                    if ($uploadedPaths instanceof JsonResponse) return $uploadedPaths;
+                $newPaths = [];
+                if (!empty($rawImages)) {
+                    $result = $this->processNewImages($firebase, $rawImages, $data['uploaded_by'] ?? ($existing['uploaded_by'] ?? 'unknown'));
+                    if ($result instanceof JsonResponse) return $result;
+
+                    $newPaths    = $result['paths'];
+                    $visionFiles = $result['files'];
                 }
 
-                $finalPaths = array_values(array_merge($keepPaths, $uploadedPaths));
+                $finalPaths = array_values(array_merge($keepPaths, $newPaths));
 
                 if (empty($finalPaths)) {
                     $data['image_path']       = null;
@@ -117,6 +144,17 @@ class OcrUploadController extends SheetResourceController
                     $data['ocr_result_raw']    = null;
                 } else {
                     $data['image_path'] = $this->normalizePaths($finalPaths);
+
+                    // Kept images only have their Firebase URL, not the raw
+                    // bytes — re-fetch them so the whole document (kept +
+                    // new pages) gets re-extracted together, same as the
+                    // "multi-page = one document" behavior on create.
+                    foreach ($keepPaths as $keepPath) {
+                        $file = $this->fetchAsVisionFile($keepPath);
+                        if ($file !== null) {
+                            $visionFiles[] = $file;
+                        }
+                    }
                 }
             } else {
                 unset($data['image_path']);
@@ -125,8 +163,8 @@ class OcrUploadController extends SheetResourceController
             unset($data['image_base64'], $data['images_base64'], $data['previous_image_paths'], $data['use_vision']);
 
             // Same PROCESSING → (PENDING|ERROR) two-write pattern as store():
-            // persist the in-progress state before calling Vision.
-            $runsVision = !empty($finalPaths) && $vision->isEnabled();
+            // persist the in-progress state before calling the LLM.
+            $runsVision = !empty($visionFiles) && $vision->isEnabled();
             if ($runsVision) {
                 $data['status'] = 'PROCESSING';
             }
@@ -138,7 +176,7 @@ class OcrUploadController extends SheetResourceController
             $this->updateRowAt($located['rowNumber'], $merged);
 
             if ($runsVision) {
-                $merged = array_merge($merged, $this->runVisionOcr($vision, $finalPaths));
+                $merged = array_merge($merged, $this->extractOcr($vision, $visionFiles));
                 $merged = $this->resolveNames($merged);
                 $this->updateRowAt($located['rowNumber'], $merged);
             }
@@ -160,7 +198,7 @@ class OcrUploadController extends SheetResourceController
     /**
      * Approve or reject an OCR upload after human review. Approve sets
      * confirmed=true; reject sets status=REJECTED (confirmed stays false) so
-     * it's distinguishable from an unreviewed COMPLETED/ERROR upload.
+     * it's distinguishable from an unreviewed PENDING/ERROR upload.
      */
     public function review(string $id, OcrUploadReviewRequest $request): JsonResponse
     {
@@ -269,107 +307,71 @@ class OcrUploadController extends SheetResourceController
     }
 
     /**
-     * Run Google Vision OCR on every uploaded image (all pages/shots of one
-     * document) whenever Vision is enabled (GOOGLE_VISION_ENABLED). image_path
-     * entries are public Firebase links (not local files), so Vision fetches
-     * each URL directly. Text and word/line blocks from every image are
-     * concatenated before the amount/date heuristics run, so a multi-page
-     * upload is still treated as a single document. Returns the OCR result
-     * columns to merge into the row, or an empty array when Vision is skipped
-     * (so the upload still succeeds).
+     * Send every page/shot of one OCR upload (images, PDFs, and/or
+     * extracted-text entries from DOCX/Excel/CSV) to Claude in a single
+     * request — multi-page/multi-shot = one document, same as the
+     * invoice-document pipeline. Returns the OCR result columns to merge
+     * into the row, or an empty array when the LLM is skipped (so the
+     * upload still succeeds).
      *
      * Fills three columns:
-     *   - ocr_result_raw    → the merged Vision payload as JSON (text + blocks)
-     *   - ocr_result_amount → the largest number found (receipt total heuristic)
-     *   - ocr_result_date   → the first date found, normalised to Y-m-d
+     *   - ocr_result_raw    → the full extraction JSON
+     *   - ocr_result_amount → total_with_tax, falling back to subtotal or the sum of lines
+     *   - ocr_result_date   → the extracted issue_date
      *
-     * @param  array<int, string>  $imageUrls
+     * @param  array<int, array{media_type: string, base64?: string, text?: string}>  $files
      * @return array<string, mixed>
      */
-    private function runVisionOcr(GoogleVisionService $vision, array $imageUrls): array
+    private function extractOcr(AnthropicVisionService $vision, array $files): array
     {
-        $imageUrls = array_values(array_filter($imageUrls));
+        $files = array_values(array_filter($files));
 
-        if (!$vision->isEnabled() || empty($imageUrls)) {
+        if (!$vision->isEnabled() || empty($files)) {
             return [];
         }
 
-        $texts  = [];
-        $blocks = [];
-        $failures = 0;
+        $extracted = $vision->extractInvoice($files);
 
-        foreach ($imageUrls as $imageUrl) {
-            try {
-                $result = $vision->extractTextFromUri($imageUrl);
-            } catch (\Throwable $e) {
-                Log::error('OCR failed', ['error' => $e->getMessage()]);
-                $result = null;
-            }
-
-            if ($result === null) {
-                $failures++;
-                continue;
-            }
-
-            $text = trim((string) ($result['text'] ?? ''));
-            if ($text !== '') {
-                $texts[] = $text;
-            }
-            $blocks = array_merge($blocks, $result['blocks'] ?? []);
-        }
-
-        if ($failures === count($imageUrls)) {
+        if ($extracted === null) {
             return [
                 'status' => 'ERROR',
                 'processed_at' => Carbon::now('Asia/Manila')->toDateTimeString(),
             ];
         }
 
-        $mergedText = implode("\n\n", $texts);
-
         return [
-            'ocr_result_raw'    => json_encode(['text' => $mergedText, 'blocks' => $blocks], JSON_UNESCAPED_UNICODE),
-            'ocr_result_amount' => $this->extractAmount($mergedText) ?: null,
-            'ocr_result_date'   => $this->extractDate($mergedText) ?: null,
+            'ocr_result_raw'    => json_encode($extracted, JSON_UNESCAPED_UNICODE),
+            'ocr_result_amount' => $this->deriveAmount($extracted) ?: null,
+            'ocr_result_date'   => $extracted['issue_date'] ?? null,
             // PENDING here means "extraction finished, awaiting human review"
-            // — see the review() action below for the approve/reject step.
+            // — see the review() action above for the approve/reject step.
             'status'            => 'PENDING',
             'processed_at'      => Carbon::now('Asia/Manila')->toDateTimeString(),
         ];
     }
 
     /**
-     * Heuristic amount extraction: the largest number in the OCR text — on a
-     * receipt/invoice the total is almost always the biggest figure. Handles
-     * thousands separators (1,234) and a leading ¥. Returns '' when none found.
+     * ocr_uploads only has a single amount column (unlike invoice_documents'
+     * subtotal/tax/total split), so collapse the richer extraction down to
+     * one number: prefer the tax-inclusive total, then the tax-exclusive
+     * subtotal, then fall back to summing the extracted lines.
      */
-    private function extractAmount(string $text): int|string
+    private function deriveAmount(array $extracted): int|null
     {
-        if (!preg_match_all('/\d[\d,]*/', $text, $matches)) {
-            return '';
+        if (is_numeric($extracted['total_with_tax'] ?? null)) {
+            return (int) $extracted['total_with_tax'];
         }
 
-        $amounts = array_filter(array_map(
-            fn ($n) => (int) str_replace(',', '', $n),
-            $matches[0]
+        if (is_numeric($extracted['subtotal'] ?? null)) {
+            return (int) $extracted['subtotal'];
+        }
+
+        $lineSum = array_sum(array_map(
+            fn ($line) => (float) ($line['amount_with_tax'] ?? $line['amount'] ?? 0),
+            $extracted['lines'] ?? []
         ));
 
-        return empty($amounts) ? '' : max($amounts);
-    }
-
-    /**
-     * Extract the first date from the OCR text and normalise to Y-m-d.
-     * Handles YYYY/MM/DD, YYYY-MM-DD, YYYY.MM.DD and Japanese YYYY年M月D日.
-     * Returns '' when no date is found.
-     */
-    private function extractDate(string $text): string
-    {
-        if (preg_match('/(\d{4})\s*[\/\-.]\s*(\d{1,2})\s*[\/\-.]\s*(\d{1,2})/', $text, $m)
-            || preg_match('/(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/u', $text, $m)) {
-            return sprintf('%04d-%02d-%02d', (int) $m[1], (int) $m[2], (int) $m[3]);
-        }
-
-        return '';
+        return $lineSum > 0 ? (int) $lineSum : null;
     }
 
     /**
@@ -451,54 +453,277 @@ class OcrUploadController extends SheetResourceController
     }
 
     /**
-     * Upload one or more base64 images to Firebase (all pages/shots of one
-     * upload). Returns the list of public URLs in the same order as $images,
-     * or a JsonResponse on the first decode/upload failure.
+     * Decode, validate, and upload every newly-added file to Firebase,
+     * building both the public URL list (for image_path) and the vision-file
+     * list Claude's vision API needs — decoded once and reused for both, so
+     * we never re-fetch what we just uploaded.
      *
-     * @param  array<int, string>  $images
-     * @return array<int, string>|JsonResponse
+     * @param  array<int, string>  $rawImages
+     * @return array{paths: array<int, string>, files: array<int, array{media_type: string, base64?: string, text?: string}>}|JsonResponse
      */
-    private function uploadImages(FirebaseService $firebase, array $images, string $uploadedBy): array|JsonResponse
+    private function processNewImages(FirebaseService $firebase, array $rawImages, string $uploadedBy): array|JsonResponse
     {
         $bucket = $firebase->storage()->getBucket();
-        $multiple = count($images) > 1;
-        $paths = [];
+        $paths  = [];
+        $files  = [];
 
-        foreach ($images as $index => $base64) {
-            $image = base64_decode(preg_replace('#^data:image/\w+;base64,#i', '', $base64));
-
-            if ($image === false || strlen($image) < 100) {
+        foreach ($rawImages as $index => $dataUri) {
+            $decoded = $this->decodeImage($dataUri);
+            if ($decoded === null) {
                 return response()->json([
                     'success' => false,
-                    'message' => $multiple ? "File #{$index} is not a valid base64 image." : 'Invalid base64 image.',
+                    'message' => "File #{$index} is not a supported file type.",
                 ], 422);
             }
 
-            $suffix   = $multiple ? '_' . $index : '';
-            $fileName = 'ocr_uploads/' . $uploadedBy . '_' . Carbon::now('Asia/Manila')->format('Ymd_His_u') . $suffix . '.png';
+            $uploaded = $this->uploadDecodedImage($bucket, $decoded, $uploadedBy, $index);
+            if ($uploaded instanceof JsonResponse) {
+                return $uploaded;
+            }
 
-            try {
-                $object = $bucket->upload($image, ['name' => $fileName]);
+            $paths[] = $uploaded;
+            $files[] = $this->buildVisionFile($decoded);
+        }
 
-                if (!$object) throw new \Exception('Firebase upload returned null.');
+        return ['paths' => $paths, 'files' => $files];
+    }
 
-                $object->update([], ['predefinedAcl' => 'PUBLICREAD']);
+    /**
+     * Build one Claude-ready file entry from a decoded upload. Images and
+     * PDFs go straight through as base64 attachments (what Claude's vision
+     * API accepts natively); DOCX/Excel/CSV have no such support, so their
+     * text is extracted server-side first and sent as a plain text block.
+     *
+     * @param  array{mime: string, base64: string}  $decoded
+     * @return array{media_type: string, base64?: string, text?: string}
+     */
+    private function buildVisionFile(array $decoded): array
+    {
+        if (!in_array($decoded['mime'], self::TEXT_EXTRACTED_MIME_TYPES, true)) {
+            return ['media_type' => $decoded['mime'], 'base64' => $decoded['base64']];
+        }
 
-                $uploaded = $bucket->object($fileName);
-                if (!$uploaded->exists() || ($uploaded->info()['size'] ?? 0) == 0) {
-                    throw new \Exception('Uploaded file is empty or missing.');
+        $raw = base64_decode($decoded['base64']);
+
+        $text = match ($decoded['mime']) {
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => $this->extractDocxText($raw),
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' => $this->extractSpreadsheetText($raw, 'xlsx'),
+            'application/vnd.ms-excel' => $this->extractSpreadsheetText($raw, 'xls'),
+            'text/csv' => $this->extractCsvText($raw),
+            default => '',
+        };
+
+        return ['media_type' => 'text/plain', 'text' => $text];
+    }
+
+    /**
+     * Extract plain text from a .docx file via PhpWord. Covers paragraphs,
+     * text runs, and table cells — good enough for an OCR prefill, not a
+     * full-fidelity document reader.
+     */
+    private function extractDocxText(string $raw): string
+    {
+        $tmpBase = tempnam(sys_get_temp_dir(), 'ocr_docx_');
+        unlink($tmpBase);
+        $tmpPath = $tmpBase . '.docx';
+        file_put_contents($tmpPath, $raw);
+
+        try {
+            $phpWord = \PhpOffice\PhpWord\IOFactory::load($tmpPath);
+            $lines = [];
+
+            foreach ($phpWord->getSections() as $section) {
+                $this->collectPhpWordText($section, $lines);
+            }
+
+            return trim(implode("\n", $lines));
+        } catch (\Throwable $e) {
+            Log::warning('DOCX text extraction failed.', ['error' => $e->getMessage()]);
+            return '';
+        } finally {
+            @unlink($tmpPath);
+        }
+    }
+
+    /**
+     * @param  array<int, string>  $lines
+     */
+    private function collectPhpWordText(mixed $container, array &$lines): void
+    {
+        if (!method_exists($container, 'getElements')) {
+            return;
+        }
+
+        foreach ($container->getElements() as $element) {
+            if ($element instanceof \PhpOffice\PhpWord\Element\Text) {
+                $lines[] = $element->getText();
+            } elseif ($element instanceof \PhpOffice\PhpWord\Element\Table) {
+                foreach ($element->getRows() as $row) {
+                    foreach ($row->getCells() as $cell) {
+                        $this->collectPhpWordText($cell, $lines);
+                    }
                 }
+            } elseif (method_exists($element, 'getElements')) {
+                $this->collectPhpWordText($element, $lines);
+            }
+        }
+    }
 
-                $paths[] = 'https://storage.googleapis.com/' . $bucket->name() . '/' . $fileName;
-            } catch (\Throwable $e) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Firebase upload failed.',
-                    'error'   => $e->getMessage(),
-                ], 500);
+    /**
+     * Extract every sheet's cells as tab-separated text via PhpSpreadsheet.
+     */
+    private function extractSpreadsheetText(string $raw, string $extension): string
+    {
+        $tmpBase = tempnam(sys_get_temp_dir(), 'ocr_xls_');
+        unlink($tmpBase);
+        $tmpPath = $tmpBase . '.' . $extension;
+        file_put_contents($tmpPath, $raw);
+
+        try {
+            $spreadsheet = \PhpOffice\PhpSpreadsheet\IOFactory::load($tmpPath);
+            $lines = [];
+
+            foreach ($spreadsheet->getAllSheets() as $sheet) {
+                foreach ($sheet->toArray(null, true, true, false) as $row) {
+                    $line = implode("\t", array_map(fn ($cell) => trim((string) ($cell ?? '')), $row));
+                    if ($line !== '') {
+                        $lines[] = $line;
+                    }
+                }
+            }
+
+            return trim(implode("\n", $lines));
+        } catch (\Throwable $e) {
+            Log::warning('Spreadsheet text extraction failed.', ['error' => $e->getMessage()]);
+            return '';
+        } finally {
+            @unlink($tmpPath);
+        }
+    }
+
+    /**
+     * CSV is already plain text — just normalize the encoding. Japanese CSV
+     * exports are frequently Shift-JIS rather than UTF-8, so detect and
+     * convert when needed.
+     */
+    private function extractCsvText(string $raw): string
+    {
+        if (!mb_check_encoding($raw, 'UTF-8')) {
+            $detected = mb_detect_encoding($raw, ['UTF-8', 'SJIS-win', 'SJIS', 'EUC-JP'], true);
+            if ($detected && $detected !== 'UTF-8') {
+                $raw = mb_convert_encoding($raw, 'UTF-8', $detected);
             }
         }
 
-        return $paths;
+        return trim($raw);
+    }
+
+    /**
+     * @return array{mime: string, base64: string}|null
+     */
+    private function decodeImage(string $dataUri): ?array
+    {
+        if (!preg_match('#^data:([\w/+.-]+);base64,(.+)$#s', $dataUri, $m)) {
+            return null;
+        }
+
+        $mime = strtolower($m[1]);
+        if (!in_array($mime, self::ALLOWED_MIME_TYPES, true)) {
+            return null;
+        }
+
+        $raw = base64_decode($m[2], true);
+        if ($raw === false || strlen($raw) < 100) {
+            return null;
+        }
+
+        return ['mime' => $mime, 'base64' => $m[2]];
+    }
+
+    /**
+     * Upload one decoded file to Firebase. Returns the public URL or a JsonResponse on error.
+     *
+     * @param  array{mime: string, base64: string}  $decoded
+     */
+    private function uploadDecodedImage(Bucket $bucket, array $decoded, string $uploadedBy, int $index): string|JsonResponse
+    {
+        $extension = match ($decoded['mime']) {
+            'application/pdf' => 'pdf',
+            'image/png' => 'png',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => 'docx',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' => 'xlsx',
+            'application/vnd.ms-excel' => 'xls',
+            'text/csv' => 'csv',
+            default => 'jpg',
+        };
+
+        $raw = base64_decode($decoded['base64']);
+        $fileName = 'ocr_uploads/' . $uploadedBy . '_' . Carbon::now('Asia/Manila')->format('Ymd_His_u') . '_' . $index . '.' . $extension;
+
+        try {
+            $object = $bucket->upload($raw, ['name' => $fileName]);
+
+            if (!$object) throw new \Exception('Firebase upload returned null.');
+
+            $object->update([], ['predefinedAcl' => 'PUBLICREAD']);
+
+            $uploaded = $bucket->object($fileName);
+            if (!$uploaded->exists() || ($uploaded->info()['size'] ?? 0) == 0) {
+                throw new \Exception('Uploaded file is empty or missing.');
+            }
+
+            return 'https://storage.googleapis.com/' . $bucket->name() . '/' . $fileName;
+        } catch (\Throwable $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Firebase upload failed.',
+                'error'   => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Re-download an already-uploaded (kept) file so it can be included in a
+     * fresh Claude extraction alongside newly-added pages. Best-effort —
+     * returns null on any failure so one unreachable file doesn't fail the
+     * whole update.
+     *
+     * @return array{media_type: string, base64?: string, text?: string}|null
+     */
+    private function fetchAsVisionFile(string $url): ?array
+    {
+        try {
+            $response = Http::timeout(30)->get($url);
+            if (!$response->successful()) {
+                return null;
+            }
+
+            $mime = strtolower((string) $response->header('Content-Type')) ?: $this->guessMimeFromUrl($url);
+            $mime = strtok($mime, ';'); // strip a "; charset=..." suffix if present
+
+            if (!in_array($mime, self::ALLOWED_MIME_TYPES, true)) {
+                return null;
+            }
+
+            return $this->buildVisionFile(['mime' => $mime, 'base64' => base64_encode($response->body())]);
+        } catch (\Throwable $e) {
+            Log::warning('Failed to re-fetch kept image for OCR re-extraction.', ['url' => $url, 'error' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    private function guessMimeFromUrl(string $url): string
+    {
+        $extension = strtolower(pathinfo(parse_url($url, PHP_URL_PATH) ?? '', PATHINFO_EXTENSION));
+
+        return match ($extension) {
+            'pdf' => 'application/pdf',
+            'png' => 'image/png',
+            'docx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'xlsx' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'xls' => 'application/vnd.ms-excel',
+            'csv' => 'text/csv',
+            default => 'image/jpeg',
+        };
     }
 }

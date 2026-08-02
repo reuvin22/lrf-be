@@ -46,11 +46,6 @@ return [
         'spreadsheet_id' => env('GOOGLE_SPREADSHEET_ID'),
     ],
 
-    'google_vision' => [
-        'enabled' => env('GOOGLE_VISION_ENABLED', false),
-        'credentials' => env('GOOGLE_SHEETS_CREDENTIALS_FILE', storage_path('app/google-sheets.json')),
-    ],
-
     'anthropic' => [
         'api_key' => env('ANTHROPIC_API_KEY'),
         'model' => env('ANTHROPIC_MODEL', 'claude-3-5-haiku-latest'),

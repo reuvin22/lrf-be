@@ -7,9 +7,9 @@ use Illuminate\Support\Facades\Log;
 
 /**
  * Thin wrapper around the Anthropic Messages API for invoice LLM-vision
- * extraction. Mirrors GoogleVisionService's shape: isEnabled() lets callers
- * short-circuit, and every failure mode returns null instead of throwing —
- * OCR output is only a prefill, so a failed call must never block the upload.
+ * extraction. isEnabled() lets callers short-circuit, and every failure mode
+ * returns null instead of throwing — OCR output is only a prefill, so a
+ * failed call must never block the upload.
  */
 class AnthropicVisionService
 {
@@ -73,7 +73,13 @@ PROMPT;
      * request (multi-page/multi-shot = one document) and parse the
      * structured JSON extraction.
      *
-     * @param  array<int, array{media_type: string, base64: string}>  $files
+     * Claude's vision API only accepts images and PDFs as attachments — it
+     * has no concept of DOCX/Excel/CSV. For those, the caller extracts the
+     * text server-side and passes it here as a `text` entry instead of
+     * `base64`; it's sent as a plain text content block alongside any
+     * image/PDF attachments in the same request.
+     *
+     * @param  array<int, array{media_type: string, base64?: string, text?: string}>  $files
      * @return array<string, mixed>|null null when disabled or the call/parse fails.
      */
     public function extractInvoice(array $files): ?array
@@ -86,6 +92,11 @@ PROMPT;
         $hasPdf = false;
 
         foreach ($files as $file) {
+            if (isset($file['text'])) {
+                $content[] = ['type' => 'text', 'text' => $file['text']];
+                continue;
+            }
+
             $mediaType = $file['media_type'] ?? '';
             $hasPdf = $hasPdf || $mediaType === 'application/pdf';
 
