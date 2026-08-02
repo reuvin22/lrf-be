@@ -128,11 +128,21 @@ class InvoiceDocumentController extends SheetResourceController
 
         $lines = [];
         $vendorCandidates = [];
+        $runsVision = $vision->isEnabled();
 
-        if (! $vision->isEnabled()) {
+        if (! $runsVision) {
             $document['status'] = 'NEEDS_REVIEW';
             $document['warnings'] = ['LLM extraction is not configured; please enter details manually.'];
+            $this->appendRow($document);
         } else {
+            // Write the row as PROCESSING before calling the LLM, then update
+            // it once extraction finishes, so other clients polling the list
+            // see the in-progress state rather than the row appearing only
+            // after extraction completes.
+            $document['status'] = 'PROCESSING';
+            $this->appendRow($document);
+            $located = $this->locate($documentId);
+
             $extracted = $vision->extractInvoice($files);
 
             if ($extracted === null) {
@@ -175,9 +185,11 @@ class InvoiceDocumentController extends SheetResourceController
                     $lines[] = $lineData + ['candidates' => $siteCandidates];
                 }
             }
-        }
 
-        $this->appendRow($document);
+            if ($located) {
+                $this->updateRowAt($located['rowNumber'], $document);
+            }
+        }
 
         event(new InvoiceDocumentEvent($document, strtolower($document['status'])));
 

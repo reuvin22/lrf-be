@@ -39,20 +39,36 @@ class OcrUploadController extends SheetResourceController
         $data              = $request->validated();
         $data['upload_id'] = (string) Str::uuid();
         $images            = $this->collectNewImages($data);
+        $imagePaths        = [];
 
         if (!empty($images)) {
             $imagePaths = $this->uploadImages($firebase, $images, $data['uploaded_by'] ?? 'unknown');
             if ($imagePaths instanceof JsonResponse) return $imagePaths;
             $data['image_path'] = $this->normalizePaths($imagePaths);
-
-            $data = array_merge($data, $this->runVisionOcr($vision, $imagePaths));
         }
 
         unset($data['image_base64'], $data['images_base64'], $data['previous_image_paths'], $data['use_vision']);
 
-        $data = $this->resolveNames($data);
+        // Write the row as PROCESSING before calling Vision, then update it
+        // once extraction finishes, so other clients polling the list see the
+        // in-progress state rather than the row appearing only after OCR completes.
+        $runsVision = !empty($imagePaths) && $vision->isEnabled();
+        if ($runsVision) {
+            $data['status'] = 'PROCESSING';
+        }
 
+        $data = $this->resolveNames($data);
         $this->appendRow($data);
+
+        if ($runsVision) {
+            $located = $this->locate($data['upload_id']);
+            $data    = array_merge($data, $this->runVisionOcr($vision, $imagePaths));
+            $data    = $this->resolveNames($data);
+
+            if ($located) {
+                $this->updateRowAt($located['rowNumber'], $data);
+            }
+        }
 
         return response()->json([
             'success' => true,
@@ -76,6 +92,7 @@ class OcrUploadController extends SheetResourceController
         // existing image not present in `previous_image_paths` was removed
         // by the user and must be deleted from Firebase.
         $touchesImages = array_key_exists('images_base64', $data) || array_key_exists('previous_image_paths', $data);
+        $finalPaths    = [];
 
         try {
             if ($touchesImages) {
@@ -100,7 +117,6 @@ class OcrUploadController extends SheetResourceController
                     $data['ocr_result_raw']    = null;
                 } else {
                     $data['image_path'] = $this->normalizePaths($finalPaths);
-                    $data = array_merge($data, $this->runVisionOcr($vision, $finalPaths));
                 }
             } else {
                 unset($data['image_path']);
@@ -108,11 +124,24 @@ class OcrUploadController extends SheetResourceController
 
             unset($data['image_base64'], $data['images_base64'], $data['previous_image_paths'], $data['use_vision']);
 
+            // Same PROCESSING → (PENDING|ERROR) two-write pattern as store():
+            // persist the in-progress state before calling Vision.
+            $runsVision = !empty($finalPaths) && $vision->isEnabled();
+            if ($runsVision) {
+                $data['status'] = 'PROCESSING';
+            }
+
             $merged              = array_merge($existing, $data);
             $merged['upload_id'] = $id;
             $merged              = $this->resolveNames($merged);
 
             $this->updateRowAt($located['rowNumber'], $merged);
+
+            if ($runsVision) {
+                $merged = array_merge($merged, $this->runVisionOcr($vision, $finalPaths));
+                $merged = $this->resolveNames($merged);
+                $this->updateRowAt($located['rowNumber'], $merged);
+            }
 
             return response()->json([
                 'success' => true,
@@ -291,7 +320,7 @@ class OcrUploadController extends SheetResourceController
 
         if ($failures === count($imageUrls)) {
             return [
-                'status' => 'error',
+                'status' => 'ERROR',
                 'processed_at' => Carbon::now('Asia/Manila')->toDateTimeString(),
             ];
         }
@@ -302,7 +331,9 @@ class OcrUploadController extends SheetResourceController
             'ocr_result_raw'    => json_encode(['text' => $mergedText, 'blocks' => $blocks], JSON_UNESCAPED_UNICODE),
             'ocr_result_amount' => $this->extractAmount($mergedText) ?: null,
             'ocr_result_date'   => $this->extractDate($mergedText) ?: null,
-            'status'            => 'completed',
+            // PENDING here means "extraction finished, awaiting human review"
+            // — see the review() action below for the approve/reject step.
+            'status'            => 'PENDING',
             'processed_at'      => Carbon::now('Asia/Manila')->toDateTimeString(),
         ];
     }
