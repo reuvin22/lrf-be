@@ -43,7 +43,7 @@ class InvoiceDocumentController extends SheetResourceController
 
     public function index(Request $request): JsonResponse
     {
-        $rows = $this->all();
+        $rows = $this->safeReadSheet($this->sheetName);
 
         if ($status = $request->query('status')) {
             $rows = array_values(array_filter($rows, fn ($row) => ($row['status'] ?? '') === $status));
@@ -72,7 +72,7 @@ class InvoiceDocumentController extends SheetResourceController
     {
         $matcher ??= app(InvoiceNameMatchingService::class);
 
-        $document = $this->find($id);
+        $document = collect($this->safeReadSheet($this->sheetName))->firstWhere('document_id', $id);
         if (! $document) {
             return $this->notFound();
         }
@@ -374,7 +374,7 @@ class InvoiceDocumentController extends SheetResourceController
 
     private function allLines(): array
     {
-        return $this->sheet->getRowsAsAssoc($this->spreadsheetId(), self::LINES_SHEET);
+        return $this->safeReadSheet(self::LINES_SHEET);
     }
 
     private function linesFor(string $documentId): array

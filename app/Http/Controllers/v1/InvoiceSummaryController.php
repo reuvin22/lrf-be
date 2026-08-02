@@ -146,7 +146,7 @@ class InvoiceSummaryController extends SheetResourceController
     private function confirmedLines(?string $month = null, ?string $siteId = null): array
     {
         $documentsById = [];
-        foreach ($this->all() as $document) {
+        foreach ($this->safeReadSheet($this->sheetName) as $document) {
             if (($document['status'] ?? '') !== 'CONFIRMED') {
                 continue;
             }
@@ -161,7 +161,7 @@ class InvoiceSummaryController extends SheetResourceController
         }
 
         $lines = [];
-        foreach ($this->sheet->getRowsAsAssoc($this->spreadsheetId(), self::LINES_SHEET) as $line) {
+        foreach ($this->safeReadSheet(self::LINES_SHEET) as $line) {
             $document = $documentsById[$line['invoice_document_id'] ?? ''] ?? null;
             if ($document === null) {
                 continue;

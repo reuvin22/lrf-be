@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Services\GoogleSheetService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 
 abstract class SheetResourceController extends Controller
 {
@@ -25,6 +26,23 @@ abstract class SheetResourceController extends Controller
     protected function all(): array
     {
         return $this->sheet->getRowsAsAssoc($this->spreadsheetId(), $this->sheetName);
+    }
+
+    /**
+     * Read a sheet tab's rows, tolerating the tab not existing yet (e.g. a
+     * newly-added feature's tabs before `sheets:setup` has been run against
+     * the live spreadsheet) by logging a warning and returning an empty list
+     * instead of throwing. Use for read endpoints where "no data yet" is a
+     * better response than a 500.
+     */
+    protected function safeReadSheet(string $sheetName): array
+    {
+        try {
+            return $this->sheet->getRowsAsAssoc($this->spreadsheetId(), $sheetName);
+        } catch (\Throwable $e) {
+            Log::warning('Failed to read sheet tab.', ['sheet' => $sheetName, 'error' => $e->getMessage()]);
+            return [];
+        }
     }
 
     protected function find(string $id): ?array
