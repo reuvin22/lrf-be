@@ -30,7 +30,7 @@ class GoogleSheetService
         ]);
 
         $client->setAuthConfig(
-            storage_path('app/' . env('GOOGLE_SHEETS_CREDENTIALS_FILE'))
+            config('services.google_sheets.credentials')
         );
 
         $this->client = $client;
