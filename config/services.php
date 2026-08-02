@@ -36,7 +36,7 @@ return [
     ],
 
     'firebase' => [
-        'credentials' => storage_path('app/lrfsystem-98c20-firebase-adminsdk-fbsvc-7e61616c35.json'),
+        'credentials' => env('FIREBASE_CREDENTIALS_FILE'),
         'storage_bucket' => env('FIREBASE_STORAGE_BUCKET'),
     ],
 
