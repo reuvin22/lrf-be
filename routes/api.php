@@ -6,6 +6,7 @@ use App\Http\Controllers\v1\CompanyCalendarController;
 use App\Http\Controllers\v1\ConstructionSitesController;
 use App\Http\Controllers\v1\DayTypeController;
 use App\Http\Controllers\v1\EmployeeController;
+use App\Http\Controllers\v1\InvoiceDocumentController;
 use App\Http\Controllers\v1\OcrCategoriesController;
 use App\Http\Controllers\v1\OcrUploadController;
 use App\Http\Controllers\v1\RatesController;
@@ -26,8 +27,7 @@ Route::get('/user', function (Request $request) {
     return $request->user();
 })->middleware('auth:sanctum');
 
-
-Route::prefix('v1')->group(function() {
+Route::prefix('v1')->group(function () {
     Route::delete('transportation_expenses/bulk-delete', [TransportationExpenseController::class, 'bulkDelete']);
     Route::resource('attendances', AttendanceController::class);
     Route::resource('segments', SegmentController::class);
@@ -41,7 +41,10 @@ Route::prefix('v1')->group(function() {
     Route::resource('subcontractor-reports', SubContractorReportController::class);
     Route::resource('subcontractor-workers', SubContractorWorkersController::class);
     Route::resource('attendance-subcontractor-segments', AttendanceSubSegmentController::class);
+    Route::patch('ocr-uploads/{id}/review', [OcrUploadController::class, 'review']);
     Route::resource('ocr-uploads', OcrUploadController::class);
+    Route::patch('invoice-documents/{id}/confirm', [InvoiceDocumentController::class, 'confirm']);
+    Route::resource('invoice-documents', InvoiceDocumentController::class);
     Route::resource('rates', RatesController::class);
     Route::resource('company-calendar', CompanyCalendarController::class);
     Route::resource('day-types', DayTypeController::class);

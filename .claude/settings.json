@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./vendor/bin/pint app/Services/AnthropicVisionService.php app/Services/InvoiceNameMatchingService.php app/Services/InvoiceExtractionValidator.php app/Events/InvoiceDocumentEvent.php app/Http/Requests/v1/InvoiceDocumentRequest.php app/Http/Requests/v1/InvoiceDocumentUpdateRequest.php app/Http/Requests/v1/InvoiceDocumentConfirmRequest.php app/Http/Controllers/v1/InvoiceDocumentController.php app/Console/Commands/SheetsSetup.php routes/api.php config/services.php)",
+      "Bash(php artisan *)",
+      "Bash(php -l app/Http/Controllers/v1/InvoiceDocumentController.php)",
+      "Bash(composer dump-autoload *)",
+      "Bash(php -r \"echo json_encode\\(json_decode\\(file_get_contents\\('storage/app/lrf.json'\\), true\\) !== null ? 'valid json' : 'INVALID json'\\);\")",
+      "Bash(php -r '$c = json_decode\\(file_get_contents\\('\\\\''storage/app/lrf.json'\\\\''\\), true\\); echo '\\\\''Service account email: '\\\\'' . \\($c['\\\\''client_email'\\\\''] ?? '\\\\''NOT FOUND'\\\\''\\) . PHP_EOL; echo '\\\\''Project: '\\\\'' . \\($c['\\\\''project_id'\\\\''] ?? '\\\\''NOT FOUND'\\\\''\\) . PHP_EOL;')",
+      "Bash(php -l app/Http/Controllers/v1/OcrUploadController.php)",
+      "Bash(php -l app/Http/Requests/v1/OcrUploadRequest.php)",
+      "Bash(./vendor/bin/pint app/Http/Controllers/v1/OcrUploadController.php app/Http/Requests/v1/OcrUploadRequest.php --test)",
+      "Bash(composer test *)",
+      "Read(//c/Users/reuvi/Downloads/**)",
+      "Bash(php -l app/Http/Requests/v1/OcrUploadReviewRequest.php)",
+      "Bash(php -l routes/api.php)",
+      "Bash(php -l app/Console/Commands/SheetsSetup.php)"
+    ]
+  }
+}

@@ -3,9 +3,11 @@
 namespace App\Http\Controllers\v1;
 
 use App\Http\Requests\v1\OcrUploadRequest;
+use App\Http\Requests\v1\OcrUploadReviewRequest;
 use App\Services\FirebaseService;
 use App\Services\GoogleVisionService;
 use Carbon\Carbon;
+use Google\Cloud\Storage\Bucket;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -36,17 +38,17 @@ class OcrUploadController extends SheetResourceController
     {
         $data              = $request->validated();
         $data['upload_id'] = (string) Str::uuid();
-        $base64            = $request->input('image_base64');
+        $images            = $this->collectImagesInput($data);
 
-        if (!empty($base64)) {
-            $imagePath = $this->uploadImage($firebase, $base64, $data['uploaded_by'] ?? 'unknown');
-            if ($imagePath instanceof JsonResponse) return $imagePath;
-            $data['image_path'] = $imagePath;
+        if (!empty($images)) {
+            $imagePaths = $this->uploadImages($firebase, $images, $data['uploaded_by'] ?? 'unknown');
+            if ($imagePaths instanceof JsonResponse) return $imagePaths;
+            $data['image_path'] = $this->normalizePaths($imagePaths);
 
-            $data = array_merge($data, $this->runVisionOcr($vision, $imagePath));
+            $data = array_merge($data, $this->runVisionOcr($vision, $imagePaths));
         }
 
-        unset($data['image_base64'], $data['use_vision']);
+        unset($data['image_base64'], $data['files'], $data['use_vision']);
 
         $data = $this->resolveNames($data);
 
@@ -66,40 +68,27 @@ class OcrUploadController extends SheetResourceController
 
         $existing = $located['data'];
         $data     = $request->validated();
-        $base64   = $request->input('image_base64');
+        $images   = $this->collectImagesInput($data);
+        $previousPath = $request->input('previous_image_path');
         $bucket   = $firebase->storage()->getBucket();
 
         try {
-            $previousPath = $request->input('previous_image_path');
-
-            if (($base64 === '' || $base64 === null) && $previousPath) {
-                try {
-                    $bucket->object('ocr_uploads/' . ltrim($previousPath, '/'))->delete();
-                } catch (\Throwable $e) {
-                    Log::warning('Firebase delete failed.', ['error' => $e->getMessage()]);
-                }
+            if (empty($images) && $previousPath) {
+                $this->deleteStoredImages($bucket, $this->resolvePaths($existing['image_path'] ?? null));
                 $data['image_path'] = null;
-            } elseif (!empty($base64)) {
-                $oldPath = $previousPath ?? ($existing['image_path'] ?? null);
-                if ($oldPath) {
-                    $parsed   = parse_url($existing['image_path'] ?? '');
-                    $filePath = ltrim(str_replace('/' . $bucket->name() . '/', '', $parsed['path'] ?? ''), '/');
-                    if ($filePath) {
-                        $obj = $bucket->object($filePath);
-                        if ($obj->exists()) $obj->delete();
-                    }
-                }
+            } elseif (!empty($images)) {
+                $this->deleteStoredImages($bucket, $this->resolvePaths($existing['image_path'] ?? null));
 
-                $imagePath = $this->uploadImage($firebase, $base64, $data['uploaded_by'] ?? ($existing['uploaded_by'] ?? 'unknown'));
-                if ($imagePath instanceof JsonResponse) return $imagePath;
-                $data['image_path'] = $imagePath;
+                $imagePaths = $this->uploadImages($firebase, $images, $data['uploaded_by'] ?? ($existing['uploaded_by'] ?? 'unknown'));
+                if ($imagePaths instanceof JsonResponse) return $imagePaths;
+                $data['image_path'] = $this->normalizePaths($imagePaths);
 
-                $data = array_merge($data, $this->runVisionOcr($vision, $imagePath));
+                $data = array_merge($data, $this->runVisionOcr($vision, $imagePaths));
             } else {
                 unset($data['image_path']);
             }
 
-            unset($data['image_base64'], $data['use_vision']);
+            unset($data['image_base64'], $data['files'], $data['use_vision']);
 
             $merged              = array_merge($existing, $data);
             $merged['upload_id'] = $id;
@@ -121,19 +110,51 @@ class OcrUploadController extends SheetResourceController
         }
     }
 
+    /**
+     * Approve or reject an OCR upload after human review. Approve sets
+     * confirmed=true; reject sets status=REJECTED (confirmed stays false) so
+     * it's distinguishable from an unreviewed COMPLETED/ERROR upload.
+     */
+    public function review(string $id, OcrUploadReviewRequest $request): JsonResponse
+    {
+        $located = $this->locate($id);
+        if (!$located) return $this->notFound();
+
+        $data = $request->validated();
+        $now  = Carbon::now('Asia/Manila')->toDateTimeString();
+
+        $merged = array_merge($located['data'], [
+            'upload_id'    => $id,
+            'confirmed'    => $data['action'] === 'approve',
+            'confirmed_by' => $data['confirmed_by'],
+            'confirmed_at' => $now,
+        ]);
+
+        if ($data['action'] === 'reject') {
+            $merged['status'] = 'REJECTED';
+        }
+
+        $this->updateRowAt($located['rowNumber'], $merged);
+
+        return response()->json([
+            'success' => true,
+            'message' => $data['action'] === 'approve'
+                ? 'OCR upload approved successfully.'
+                : 'OCR upload rejected successfully.',
+            'data'    => $merged,
+        ]);
+    }
+
     public function destroy(Request $request, ?string $id = null, ?FirebaseService $firebase = null): JsonResponse
     {
         if ($id === null) return $this->notFound('Id is required.');
         $located = $this->locate($id);
         if (!$located) return $this->notFound();
 
-        $imagePath = $located['data']['image_path'] ?? null;
-        if ($imagePath && $firebase) {
+        $paths = $this->resolvePaths($located['data']['image_path'] ?? null);
+        if (!empty($paths) && $firebase) {
             try {
-                $bucket   = $firebase->storage()->getBucket();
-                $filePath = 'ocr_uploads/' . basename($imagePath);
-                $object   = $bucket->object($filePath);
-                if ($object->exists()) $object->delete();
+                $this->deleteStoredImages($firebase->storage()->getBucket(), $paths);
             } catch (\Throwable $e) {
                 return response()->json([
                     'success' => false,
@@ -201,58 +222,71 @@ class OcrUploadController extends SheetResourceController
     }
 
     /**
-     * Run Google Vision OCR on the uploaded image whenever Vision is enabled
-     * (GOOGLE_VISION_ENABLED) and there is an image. image_path is the public
-     * Firebase link (not a local file), so Vision fetches the URL directly.
-     * Returns the OCR result columns to merge into the row, or an empty array
-     * when Vision is skipped (so the upload still succeeds).
+     * Run Google Vision OCR on every uploaded image (all pages/shots of one
+     * document) whenever Vision is enabled (GOOGLE_VISION_ENABLED). image_path
+     * entries are public Firebase links (not local files), so Vision fetches
+     * each URL directly. Text and word/line blocks from every image are
+     * concatenated before the amount/date heuristics run, so a multi-page
+     * upload is still treated as a single document. Returns the OCR result
+     * columns to merge into the row, or an empty array when Vision is skipped
+     * (so the upload still succeeds).
      *
      * Fills three columns:
-     *   - ocr_result_raw    → the full Vision payload as JSON (text + blocks)
+     *   - ocr_result_raw    → the merged Vision payload as JSON (text + blocks)
      *   - ocr_result_amount → the largest number found (receipt total heuristic)
      *   - ocr_result_date   → the first date found, normalised to Y-m-d
      *
+     * @param  array<int, string>  $imageUrls
      * @return array<string, mixed>
      */
-    private function runVisionOcr(GoogleVisionService $vision, ?string $imageUrl): array
+    private function runVisionOcr(GoogleVisionService $vision, array $imageUrls): array
     {
-        if (!$vision->isEnabled() || empty($imageUrl)) {
+        $imageUrls = array_values(array_filter($imageUrls));
+
+        if (!$vision->isEnabled() || empty($imageUrls)) {
             return [];
         }
-    
-        try {
-            $result = $vision->extractTextFromUri($imageUrl);
-    
-            if ($result === null) {
-                return [
-                    'status' => 'error',
-                    'processed_at' => Carbon::now('Asia/Manila')->toDateTimeString(),
-                ];
+
+        $texts  = [];
+        $blocks = [];
+        $failures = 0;
+
+        foreach ($imageUrls as $imageUrl) {
+            try {
+                $result = $vision->extractTextFromUri($imageUrl);
+            } catch (\Throwable $e) {
+                Log::error('OCR failed', ['error' => $e->getMessage()]);
+                $result = null;
             }
-    
+
+            if ($result === null) {
+                $failures++;
+                continue;
+            }
+
             $text = trim((string) ($result['text'] ?? ''));
-    
-            $amount = $this->extractAmount($text);
-            $date   = $this->extractDate($text);
-    
-            return [
-                'ocr_result_raw'    => json_encode($result, JSON_UNESCAPED_UNICODE),
-                'ocr_result_amount' => $amount ?: null,
-                'ocr_result_date'   => $date ?: null,
-                'status'            => 'completed',
-                'processed_at'      => Carbon::now('Asia/Manila')->toDateTimeString(),
-            ];
-    
-        } catch (\Throwable $e) {
-            Log::error('OCR failed', [
-                'error' => $e->getMessage(),
-            ]);
-    
+            if ($text !== '') {
+                $texts[] = $text;
+            }
+            $blocks = array_merge($blocks, $result['blocks'] ?? []);
+        }
+
+        if ($failures === count($imageUrls)) {
             return [
                 'status' => 'error',
                 'processed_at' => Carbon::now('Asia/Manila')->toDateTimeString(),
             ];
         }
+
+        $mergedText = implode("\n\n", $texts);
+
+        return [
+            'ocr_result_raw'    => json_encode(['text' => $mergedText, 'blocks' => $blocks], JSON_UNESCAPED_UNICODE),
+            'ocr_result_amount' => $this->extractAmount($mergedText) ?: null,
+            'ocr_result_date'   => $this->extractDate($mergedText) ?: null,
+            'status'            => 'completed',
+            'processed_at'      => Carbon::now('Asia/Manila')->toDateTimeString(),
+        ];
     }
 
     /**
@@ -290,41 +324,135 @@ class OcrUploadController extends SheetResourceController
     }
 
     /**
-     * Upload a base64 image to Firebase. Returns the public URL or a JsonResponse on error.
+     * Pull the images to upload out of the validated request data. Accepts
+     * either the new `files` array (one or many, {data: <base64>} each) or
+     * the legacy single `image_base64` field — `files` takes priority when
+     * both are present.
+     *
+     * @param  array<string, mixed>  $data
+     * @return array<int, string>
      */
-    private function uploadImage(FirebaseService $firebase, string $base64, string $uploadedBy): JsonResponse|string
+    private function collectImagesInput(array $data): array
     {
-        $image = base64_decode(preg_replace('#^data:image/\w+;base64,#i', '', $base64));
-
-        if ($image === false || strlen($image) < 100) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Invalid base64 image.',
-            ], 422);
+        if (!empty($data['files']) && is_array($data['files'])) {
+            return array_values(array_filter(array_map(
+                fn ($f) => is_array($f) ? ($f['data'] ?? null) : null,
+                $data['files']
+            )));
         }
 
-        $fileName = 'ocr_uploads/' . $uploadedBy . '_' . Carbon::now('Asia/Manila')->format('Ymd_His_u') . '.png';
+        return !empty($data['image_base64']) ? [$data['image_base64']] : [];
+    }
 
-        try {
-            $bucket = $firebase->storage()->getBucket();
-            $object = $bucket->upload($image, ['name' => $fileName]);
+    /**
+     * Collapse a list of stored paths back to the legacy single-string shape
+     * when there is only one, so existing single-image consumers of
+     * image_path keep working. Multiple images fall back to a plain array,
+     * which SheetResourceController::toRow JSON-encodes for the sheet cell.
+     *
+     * @param  array<int, string>  $paths
+     * @return string|array<int, string>
+     */
+    private function normalizePaths(array $paths): string|array
+    {
+        return count($paths) === 1 ? $paths[0] : $paths;
+    }
 
-            if (!$object) throw new \Exception('Firebase upload returned null.');
+    /**
+     * Decode a stored image_path cell back into a list of URLs. Handles the
+     * legacy plain-string shape (single image), a JSON-encoded array
+     * (multiple images), and an already-decoded array.
+     */
+    private function resolvePaths(mixed $raw): array
+    {
+        if (empty($raw)) {
+            return [];
+        }
 
-            $object->update([], ['predefinedAcl' => 'PUBLICREAD']);
+        if (is_array($raw)) {
+            return array_values(array_filter($raw));
+        }
 
-            $uploaded = $bucket->object($fileName);
-            if (!$uploaded->exists() || ($uploaded->info()['size'] ?? 0) == 0) {
-                throw new \Exception('Uploaded file is empty or missing.');
+        $decoded = json_decode((string) $raw, true);
+
+        return is_array($decoded) ? array_values(array_filter($decoded)) : [(string) $raw];
+    }
+
+    /**
+     * Delete every given public Firebase URL from the ocr_uploads/ prefix.
+     * Best-effort per file — a missing/already-deleted object is not an error.
+     *
+     * @param  array<int, string>  $paths
+     */
+    private function deleteStoredImages(Bucket $bucket, array $paths): void
+    {
+        foreach ($paths as $path) {
+            try {
+                $parsed   = parse_url($path);
+                $filePath = ltrim(str_replace('/' . $bucket->name() . '/', '', $parsed['path'] ?? ''), '/');
+                if ($filePath === '') {
+                    continue;
+                }
+
+                $object = $bucket->object($filePath);
+                if ($object->exists()) {
+                    $object->delete();
+                }
+            } catch (\Throwable $e) {
+                Log::warning('Firebase delete failed.', ['path' => $path, 'error' => $e->getMessage()]);
+            }
+        }
+    }
+
+    /**
+     * Upload one or more base64 images to Firebase (all pages/shots of one
+     * upload). Returns the list of public URLs in the same order as $images,
+     * or a JsonResponse on the first decode/upload failure.
+     *
+     * @param  array<int, string>  $images
+     * @return array<int, string>|JsonResponse
+     */
+    private function uploadImages(FirebaseService $firebase, array $images, string $uploadedBy): array|JsonResponse
+    {
+        $bucket = $firebase->storage()->getBucket();
+        $multiple = count($images) > 1;
+        $paths = [];
+
+        foreach ($images as $index => $base64) {
+            $image = base64_decode(preg_replace('#^data:image/\w+;base64,#i', '', $base64));
+
+            if ($image === false || strlen($image) < 100) {
+                return response()->json([
+                    'success' => false,
+                    'message' => $multiple ? "File #{$index} is not a valid base64 image." : 'Invalid base64 image.',
+                ], 422);
             }
 
-            return 'https://storage.googleapis.com/' . $bucket->name() . '/' . $fileName;
-        } catch (\Throwable $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Firebase upload failed.',
-                'error'   => $e->getMessage(),
-            ], 500);
+            $suffix   = $multiple ? '_' . $index : '';
+            $fileName = 'ocr_uploads/' . $uploadedBy . '_' . Carbon::now('Asia/Manila')->format('Ymd_His_u') . $suffix . '.png';
+
+            try {
+                $object = $bucket->upload($image, ['name' => $fileName]);
+
+                if (!$object) throw new \Exception('Firebase upload returned null.');
+
+                $object->update([], ['predefinedAcl' => 'PUBLICREAD']);
+
+                $uploaded = $bucket->object($fileName);
+                if (!$uploaded->exists() || ($uploaded->info()['size'] ?? 0) == 0) {
+                    throw new \Exception('Uploaded file is empty or missing.');
+                }
+
+                $paths[] = 'https://storage.googleapis.com/' . $bucket->name() . '/' . $fileName;
+            } catch (\Throwable $e) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Firebase upload failed.',
+                    'error'   => $e->getMessage(),
+                ], 500);
+            }
         }
+
+        return $paths;
     }
 }
