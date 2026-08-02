@@ -41,9 +41,9 @@ return [
     ],
 
     'google_sheets' => [
-        'credentials' => env('GOOGLE_SHEETS_CREDENTIALS_FILE', storage_path('app/google-sheets.json')),
+        'credentials'      => env('GOOGLE_SHEETS_CREDENTIALS_FILE'),
         'application_name' => env('GOOGLE_SHEETS_APPLICATION_NAME', 'LRF App'),
-        'spreadsheet_id' => env('GOOGLE_ID'),
+        'spreadsheet_id'   => env('GOOGLE_SPREADSHEET_ID'),
     ],
 
     'google_vision' => [
