@@ -52,7 +52,15 @@ class OcrUploadController extends SheetResourceController
         $rows = $this->all();
         usort($rows, fn ($a, $b) => strcmp((string)($b['uploaded_at'] ?? ''), (string)($a['uploaded_at'] ?? '')));
 
-        return response()->json(['success' => true, 'data' => $rows]);
+        return response()->json(['success' => true, 'data' => array_map($this->presentRow(...), $rows)]);
+    }
+
+    public function show(string $id): JsonResponse
+    {
+        $located = $this->locate($id);
+        if (!$located) return $this->notFound();
+
+        return response()->json(['success' => true, 'data' => $this->presentRow($located['data'])]);
     }
 
     public function store(OcrUploadRequest $request, FirebaseService $firebase, AnthropicVisionService $vision): JsonResponse
@@ -96,7 +104,7 @@ class OcrUploadController extends SheetResourceController
         return response()->json([
             'success' => true,
             'message' => 'OCR upload created successfully.',
-            'data'    => $data,
+            'data'    => $this->presentRow($data),
         ], 201);
     }
 
@@ -184,7 +192,7 @@ class OcrUploadController extends SheetResourceController
             return response()->json([
                 'success' => true,
                 'message' => 'OCR upload updated successfully.',
-                'data'    => $merged,
+                'data'    => $this->presentRow($merged),
             ]);
         } catch (\Throwable $e) {
             return response()->json([
@@ -226,7 +234,7 @@ class OcrUploadController extends SheetResourceController
             'message' => $data['action'] === 'approve'
                 ? 'OCR upload approved successfully.'
                 : 'OCR upload rejected successfully.',
-            'data'    => $merged,
+            'data'    => $this->presentRow($merged),
         ]);
     }
 
@@ -255,6 +263,29 @@ class OcrUploadController extends SheetResourceController
             'success' => true,
             'message' => 'OCR upload deleted successfully.',
         ]);
+    }
+
+    /**
+     * Shape one OcrUploads row for API responses: parse ocr_result_raw back
+     * into the structured object Claude actually extracted (document_type,
+     * vendor_name, lines, subtotal, tax_amount, total_with_tax, notes,
+     * warnings, ...) instead of leaving it as the JSON-encoded string the
+     * sheet cell stores it as. Falls back to the raw value if it isn't
+     * valid JSON (e.g. not yet processed).
+     *
+     * @param  array<string, mixed>  $row
+     * @return array<string, mixed>
+     */
+    private function presentRow(array $row): array
+    {
+        if (!empty($row['ocr_result_raw']) && is_string($row['ocr_result_raw'])) {
+            $decoded = json_decode($row['ocr_result_raw'], true);
+            if (is_array($decoded)) {
+                $row['ocr_result_raw'] = $decoded;
+            }
+        }
+
+        return $row;
     }
 
     /**
