@@ -38,7 +38,7 @@ class OcrUploadController extends SheetResourceController
     {
         $data              = $request->validated();
         $data['upload_id'] = (string) Str::uuid();
-        $images            = $this->collectImagesInput($data);
+        $images            = $this->collectNewImages($data);
 
         if (!empty($images)) {
             $imagePaths = $this->uploadImages($firebase, $images, $data['uploaded_by'] ?? 'unknown');
@@ -48,7 +48,7 @@ class OcrUploadController extends SheetResourceController
             $data = array_merge($data, $this->runVisionOcr($vision, $imagePaths));
         }
 
-        unset($data['image_base64'], $data['files'], $data['use_vision']);
+        unset($data['image_base64'], $data['images_base64'], $data['previous_image_paths'], $data['use_vision']);
 
         $data = $this->resolveNames($data);
 
@@ -68,27 +68,45 @@ class OcrUploadController extends SheetResourceController
 
         $existing = $located['data'];
         $data     = $request->validated();
-        $images   = $this->collectImagesInput($data);
-        $previousPath = $request->input('previous_image_path');
         $bucket   = $firebase->storage()->getBucket();
 
+        // The frontend always resubmits the full desired image set on edit:
+        // `previous_image_paths` is the subset of existing images the user
+        // kept, and `images_base64` is whatever new files they added. Any
+        // existing image not present in `previous_image_paths` was removed
+        // by the user and must be deleted from Firebase.
+        $touchesImages = array_key_exists('images_base64', $data) || array_key_exists('previous_image_paths', $data);
+
         try {
-            if (empty($images) && $previousPath) {
-                $this->deleteStoredImages($bucket, $this->resolvePaths($existing['image_path'] ?? null));
-                $data['image_path'] = null;
-            } elseif (!empty($images)) {
-                $this->deleteStoredImages($bucket, $this->resolvePaths($existing['image_path'] ?? null));
+            if ($touchesImages) {
+                $newImages = $this->collectNewImages($data);
+                $keepPaths = array_values(array_filter((array) ($data['previous_image_paths'] ?? [])));
+                $existingPaths = $this->resolvePaths($existing['image_path'] ?? null);
 
-                $imagePaths = $this->uploadImages($firebase, $images, $data['uploaded_by'] ?? ($existing['uploaded_by'] ?? 'unknown'));
-                if ($imagePaths instanceof JsonResponse) return $imagePaths;
-                $data['image_path'] = $this->normalizePaths($imagePaths);
+                $this->deleteStoredImages($bucket, array_diff($existingPaths, $keepPaths));
 
-                $data = array_merge($data, $this->runVisionOcr($vision, $imagePaths));
+                $uploadedPaths = [];
+                if (!empty($newImages)) {
+                    $uploadedPaths = $this->uploadImages($firebase, $newImages, $data['uploaded_by'] ?? ($existing['uploaded_by'] ?? 'unknown'));
+                    if ($uploadedPaths instanceof JsonResponse) return $uploadedPaths;
+                }
+
+                $finalPaths = array_values(array_merge($keepPaths, $uploadedPaths));
+
+                if (empty($finalPaths)) {
+                    $data['image_path']       = null;
+                    $data['ocr_result_amount'] = null;
+                    $data['ocr_result_date']   = null;
+                    $data['ocr_result_raw']    = null;
+                } else {
+                    $data['image_path'] = $this->normalizePaths($finalPaths);
+                    $data = array_merge($data, $this->runVisionOcr($vision, $finalPaths));
+                }
             } else {
                 unset($data['image_path']);
             }
 
-            unset($data['image_base64'], $data['files'], $data['use_vision']);
+            unset($data['image_base64'], $data['images_base64'], $data['previous_image_paths'], $data['use_vision']);
 
             $merged              = array_merge($existing, $data);
             $merged['upload_id'] = $id;
@@ -324,21 +342,18 @@ class OcrUploadController extends SheetResourceController
     }
 
     /**
-     * Pull the images to upload out of the validated request data. Accepts
-     * either the new `files` array (one or many, {data: <base64>} each) or
-     * the legacy single `image_base64` field — `files` takes priority when
-     * both are present.
+     * Pull the newly-added images out of the validated request data. Accepts
+     * either `images_base64` (array of base64/data-URI strings — the current
+     * frontend contract) or the legacy single `image_base64` field —
+     * `images_base64` takes priority when both are present.
      *
      * @param  array<string, mixed>  $data
      * @return array<int, string>
      */
-    private function collectImagesInput(array $data): array
+    private function collectNewImages(array $data): array
     {
-        if (!empty($data['files']) && is_array($data['files'])) {
-            return array_values(array_filter(array_map(
-                fn ($f) => is_array($f) ? ($f['data'] ?? null) : null,
-                $data['files']
-            )));
+        if (!empty($data['images_base64']) && is_array($data['images_base64'])) {
+            return array_values(array_filter($data['images_base64']));
         }
 
         return !empty($data['image_base64']) ? [$data['image_base64']] : [];
