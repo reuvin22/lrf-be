@@ -921,6 +921,7 @@ class OcrUploadController extends SheetResourceController
 
         $lines = [];
         $vendorCandidates = [];
+        $extracted = null;
         $runsVision = $vision->isEnabled();
 
         Log::info('Invoice document upload received.', [
@@ -1023,6 +1024,7 @@ class OcrUploadController extends SheetResourceController
             'data' => $document + [
                 'lines' => $lines,
                 'vendor_candidates' => $vendorCandidates,
+                'claude_response' => $extracted,
             ],
         ], 201);
     }
