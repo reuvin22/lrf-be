@@ -126,32 +126,42 @@ class OcrUploadController extends SheetResourceController
 
         unset($data['image_base64'], $data['images_base64'], $data['previous_image_paths'], $data['use_vision']);
 
-        // Write the row as PROCESSING before calling the LLM, then update it
-        // once extraction finishes, so other clients polling the list see the
-        // in-progress state rather than the row appearing only after OCR completes.
-        $runsVision = ! empty($visionFiles) && $vision->isEnabled();
-        if ($runsVision) {
-            $data['status'] = 'PROCESSING';
-        }
-
-        $data = $this->resolveNames($data);
-        $this->appendRow($data);
-
-        if ($runsVision) {
-            $located = $this->locate($data['upload_id']);
-            $data = array_merge($data, $this->extractOcr($vision, $visionFiles));
-            $data = $this->resolveNames($data);
-
-            if ($located) {
-                $this->updateRowAt($located['rowNumber'], $data);
+        try {
+            // Write the row as PROCESSING before calling the LLM, then update it
+            // once extraction finishes, so other clients polling the list see the
+            // in-progress state rather than the row appearing only after OCR completes.
+            $runsVision = ! empty($visionFiles) && $vision->isEnabled();
+            if ($runsVision) {
+                $data['status'] = 'PROCESSING';
             }
-        }
 
-        return response()->json([
-            'success' => true,
-            'message' => 'OCR upload created successfully.',
-            'data' => $this->presentRow($data),
-        ], 201);
+            $data = $this->resolveNames($data);
+            $this->appendRow($data);
+
+            if ($runsVision) {
+                $located = $this->locate($data['upload_id']);
+                $data = array_merge($data, $this->extractOcr($vision, $visionFiles));
+                $data = $this->resolveNames($data);
+
+                if ($located) {
+                    $this->updateRowAt($located['rowNumber'], $data);
+                }
+            }
+
+            return response()->json([
+                'success' => true,
+                'message' => 'OCR upload created successfully.',
+                'data' => $this->presentRow($data),
+            ], 201);
+        } catch (\Throwable $e) {
+            Log::error('Failed to save OCR upload.', ['upload_id' => $data['upload_id'], 'error' => $e->getMessage()]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to save OCR upload.',
+                'error' => $e->getMessage(),
+            ], 500);
+        }
     }
 
     public function update(OcrUploadRequest $request, string $id, FirebaseService $firebase, AnthropicVisionService $vision): JsonResponse
@@ -163,7 +173,6 @@ class OcrUploadController extends SheetResourceController
 
         $existing = $located['data'];
         $data = $request->validated();
-        $bucket = $firebase->storage()->getBucket();
 
         // The frontend always resubmits the full desired image set on edit:
         // `previous_image_paths` is the subset of existing images the user
@@ -175,6 +184,8 @@ class OcrUploadController extends SheetResourceController
         $visionFiles = [];
 
         try {
+            $bucket = $firebase->storage()->getBucket();
+
             if ($touchesImages) {
                 $rawImages = $this->collectNewImages($data);
                 $keepPaths = array_values(array_filter((array) ($data['previous_image_paths'] ?? [])));
@@ -245,6 +256,8 @@ class OcrUploadController extends SheetResourceController
                 'data' => $this->presentRow($merged),
             ]);
         } catch (\Throwable $e) {
+            Log::error('Failed to update OCR upload.', ['upload_id' => $id, 'error' => $e->getMessage()]);
+
             return response()->json([
                 'success' => false,
                 'message' => 'Update failed.',
@@ -313,7 +326,17 @@ class OcrUploadController extends SheetResourceController
             }
         }
 
-        $this->deleteRowAt($located['rowNumber']);
+        try {
+            $this->deleteRowAt($located['rowNumber']);
+        } catch (\Throwable $e) {
+            Log::error('Failed to delete OCR upload.', ['upload_id' => $id, 'error' => $e->getMessage()]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to delete OCR upload.',
+                'error' => $e->getMessage(),
+            ], 500);
+        }
 
         return response()->json([
             'success' => true,
@@ -1043,27 +1066,37 @@ class OcrUploadController extends SheetResourceController
         $merged = array_merge($located['data'], $data);
         $merged['document_id'] = $id;
 
-        $this->updateInvoiceDocumentAt($located['rowNumber'], $merged);
+        try {
+            $this->updateInvoiceDocumentAt($located['rowNumber'], $merged);
 
-        if ($lines !== null) {
-            $this->deleteLinesFor($id);
-            $newLines = [];
+            if ($lines !== null) {
+                $this->deleteLinesFor($id);
+                $newLines = [];
 
-            foreach ($lines as $line) {
-                $lineData = [
-                    'line_id' => (string) Str::uuid(),
-                    'invoice_document_id' => $id,
-                    'site_id' => $line['site_id'] ?? '',
-                    'site_name' => $line['site_name'] ?? '',
-                    'site_name_raw' => $line['site_name_raw'] ?? '',
-                    'amount' => $line['amount'] ?? '',
-                    'amount_with_tax' => $line['amount_with_tax'] ?? '',
-                ];
-                $this->appendLine($lineData);
-                $newLines[] = $lineData;
+                foreach ($lines as $line) {
+                    $lineData = [
+                        'line_id' => (string) Str::uuid(),
+                        'invoice_document_id' => $id,
+                        'site_id' => $line['site_id'] ?? '',
+                        'site_name' => $line['site_name'] ?? '',
+                        'site_name_raw' => $line['site_name_raw'] ?? '',
+                        'amount' => $line['amount'] ?? '',
+                        'amount_with_tax' => $line['amount_with_tax'] ?? '',
+                    ];
+                    $this->appendLine($lineData);
+                    $newLines[] = $lineData;
+                }
+            } else {
+                $newLines = $this->linesFor($id);
             }
-        } else {
-            $newLines = $this->linesFor($id);
+        } catch (\Throwable $e) {
+            Log::error('Failed to update invoice document.', ['document_id' => $id, 'error' => $e->getMessage()]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to update invoice document.',
+                'error' => $e->getMessage(),
+            ], 500);
         }
 
         return response()->json([
@@ -1083,58 +1116,68 @@ class OcrUploadController extends SheetResourceController
         $document = $located['data'];
         $data = $request->validated();
 
-        if (! empty($data['new_subcontractor_name'])) {
-            $subcontractorId = $matcher->createSubcontractor($data['new_subcontractor_name']);
-        } else {
-            $subcontractorId = $data['subcontractor_id'];
-        }
-
-        $matcher->confirmSubcontractorMapping(
-            $document['vendor_name_raw'] ?: ($data['new_subcontractor_name'] ?? ''),
-            $subcontractorId,
-            $id
-        );
-
-        foreach ($data['lines'] as $lineInput) {
-            $locatedLine = $this->locateLine($lineInput['line_id']);
-            if (! $locatedLine) {
-                continue;
-            }
-
-            $lineRow = $locatedLine['data'];
-
-            if (! empty($lineInput['new_site_name'])) {
-                $siteId = $matcher->createSite($lineInput['new_site_name']);
+        try {
+            if (! empty($data['new_subcontractor_name'])) {
+                $subcontractorId = $matcher->createSubcontractor($data['new_subcontractor_name']);
             } else {
-                $siteId = $lineInput['site_id'];
+                $subcontractorId = $data['subcontractor_id'];
             }
 
-            $matcher->confirmSiteMapping(
-                $lineRow['site_name_raw'] ?: ($lineInput['new_site_name'] ?? ''),
-                $siteId,
+            $matcher->confirmSubcontractorMapping(
+                $document['vendor_name_raw'] ?: ($data['new_subcontractor_name'] ?? ''),
+                $subcontractorId,
                 $id
             );
 
-            $updatedLine = array_merge($lineRow, [
-                'site_id' => $siteId,
-                'site_name' => $matcher->siteName($siteId) ?? ($lineInput['new_site_name'] ?? ''),
-                'amount' => $lineInput['amount'] ?? ($lineRow['amount'] ?? ''),
-                'amount_with_tax' => $lineInput['amount_with_tax'] ?? ($lineRow['amount_with_tax'] ?? ''),
+            foreach ($data['lines'] as $lineInput) {
+                $locatedLine = $this->locateLine($lineInput['line_id']);
+                if (! $locatedLine) {
+                    continue;
+                }
+
+                $lineRow = $locatedLine['data'];
+
+                if (! empty($lineInput['new_site_name'])) {
+                    $siteId = $matcher->createSite($lineInput['new_site_name']);
+                } else {
+                    $siteId = $lineInput['site_id'];
+                }
+
+                $matcher->confirmSiteMapping(
+                    $lineRow['site_name_raw'] ?: ($lineInput['new_site_name'] ?? ''),
+                    $siteId,
+                    $id
+                );
+
+                $updatedLine = array_merge($lineRow, [
+                    'site_id' => $siteId,
+                    'site_name' => $matcher->siteName($siteId) ?? ($lineInput['new_site_name'] ?? ''),
+                    'amount' => $lineInput['amount'] ?? ($lineRow['amount'] ?? ''),
+                    'amount_with_tax' => $lineInput['amount_with_tax'] ?? ($lineRow['amount_with_tax'] ?? ''),
+                ]);
+
+                $this->updateLineAt($locatedLine['rowNumber'], $updatedLine);
+            }
+
+            $document = array_merge($document, [
+                'document_id' => $id,
+                'subcontractor_id' => $subcontractorId,
+                'subcontractor_name' => $matcher->subcontractorName($subcontractorId) ?? ($data['new_subcontractor_name'] ?? ''),
+                'status' => 'CONFIRMED',
+                'confirmed_by' => $data['confirmed_by'],
+                'confirmed_at' => Carbon::now('Asia/Manila')->toDateTimeString(),
             ]);
 
-            $this->updateLineAt($locatedLine['rowNumber'], $updatedLine);
+            $this->updateInvoiceDocumentAt($located['rowNumber'], $document);
+        } catch (\Throwable $e) {
+            Log::error('Failed to confirm invoice document.', ['document_id' => $id, 'error' => $e->getMessage()]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to confirm invoice document.',
+                'error' => $e->getMessage(),
+            ], 500);
         }
-
-        $document = array_merge($document, [
-            'document_id' => $id,
-            'subcontractor_id' => $subcontractorId,
-            'subcontractor_name' => $matcher->subcontractorName($subcontractorId) ?? ($data['new_subcontractor_name'] ?? ''),
-            'status' => 'CONFIRMED',
-            'confirmed_by' => $data['confirmed_by'],
-            'confirmed_at' => Carbon::now('Asia/Manila')->toDateTimeString(),
-        ]);
-
-        $this->updateInvoiceDocumentAt($located['rowNumber'], $document);
 
         event(new InvoiceDocumentEvent($document, 'confirmed'));
 
@@ -1174,8 +1217,18 @@ class OcrUploadController extends SheetResourceController
             }
         }
 
-        $this->deleteLinesFor($id);
-        $this->sheet->deleteRow($this->spreadsheetId(), self::INVOICE_SHEET, $located['rowNumber']);
+        try {
+            $this->deleteLinesFor($id);
+            $this->sheet->deleteRow($this->spreadsheetId(), self::INVOICE_SHEET, $located['rowNumber']);
+        } catch (\Throwable $e) {
+            Log::error('Failed to delete invoice document.', ['document_id' => $id, 'error' => $e->getMessage()]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to delete invoice document.',
+                'error' => $e->getMessage(),
+            ], 500);
+        }
 
         return response()->json([
             'success' => true,
