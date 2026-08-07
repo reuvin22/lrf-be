@@ -25,5 +25,9 @@ EXPOSE 8080
 
 CMD php artisan config:cache && \
     php artisan route:cache && \
-    (while true; do php artisan queue:work --tries=2 --timeout=180 --max-time=3300; sleep 2; done &) && \
+    (if php artisan migrate --force; then \
+        (while true; do php artisan queue:work --tries=2 --timeout=180 --max-time=3300; sleep 15; done &); \
+    else \
+        echo "Skipping queue worker: migrate failed (DB unreachable?). Uploads needing extraction will stay PROCESSING until this is fixed."; \
+    fi) && \
     php artisan serve --host=0.0.0.0 --port=${PORT}
