@@ -923,66 +923,97 @@ class OcrUploadController extends SheetResourceController
         $vendorCandidates = [];
         $runsVision = $vision->isEnabled();
 
-        if (! $runsVision) {
-            $document['status'] = 'NEEDS_REVIEW';
-            $document['warnings'] = ['LLM extraction is not configured; please enter details manually.'];
-            $this->appendInvoiceDocument($document);
-        } else {
-            // Write the row as PROCESSING before calling the LLM, then update
-            // it once extraction finishes, so other clients polling the list
-            // see the in-progress state rather than the row appearing only
-            // after extraction completes.
-            $document['status'] = 'PROCESSING';
-            $this->appendInvoiceDocument($document);
-            $located = $this->locateInvoiceDocument($documentId);
+        Log::info('Invoice document upload received.', [
+            'document_id' => $documentId,
+            'file_count' => count($files),
+            'vision_enabled' => $runsVision,
+        ]);
 
-            $extracted = $vision->extractInvoice($files);
-
-            if ($extracted === null) {
-                $document['status'] = 'ERROR';
-            } else {
-                $warnings = $validator->validate($extracted);
-                $vendorCandidates = $matcher->candidatesForSubcontractor($extracted['vendor_name'] ?? null);
-                $topVendor = $vendorCandidates[0] ?? null;
-                $vendorPreselect = $topVendor && ! empty($topVendor['preselect']);
-
-                $document['vendor_name_raw'] = $extracted['vendor_name'] ?? '';
-                $document['issue_date'] = $extracted['issue_date'] ?? '';
-                $document['billing_month'] = $extracted['billing_month'] ?? '';
-                $document['document_type'] = $extracted['document_type'] ?? '';
-                $document['subtotal'] = $extracted['subtotal'] ?? '';
-                $document['tax_amount'] = $extracted['tax_amount'] ?? '';
-                $document['total_with_tax'] = $extracted['total_with_tax'] ?? '';
-                $document['ocr_result_raw'] = json_encode($extracted, JSON_UNESCAPED_UNICODE);
+        try {
+            if (! $runsVision) {
                 $document['status'] = 'NEEDS_REVIEW';
-                $document['warnings'] = $warnings;
-                $document['subcontractor_id'] = $vendorPreselect ? $topVendor['id'] : '';
-                $document['subcontractor_name'] = $vendorPreselect ? $topVendor['name'] : '';
+                $document['warnings'] = ['LLM extraction is not configured; please enter details manually.'];
+                $this->appendInvoiceDocument($document);
+            } else {
+                // Write the row as PROCESSING before calling the LLM, then update
+                // it once extraction finishes, so other clients polling the list
+                // see the in-progress state rather than the row appearing only
+                // after extraction completes.
+                $document['status'] = 'PROCESSING';
+                $this->appendInvoiceDocument($document);
+                $located = $this->locateInvoiceDocument($documentId);
 
-                foreach (($extracted['lines'] ?? []) as $extractedLine) {
-                    $siteCandidates = $matcher->candidatesForSite($extractedLine['site_name'] ?? null);
-                    $topSite = $siteCandidates[0] ?? null;
-                    $sitePreselect = $topSite && ! empty($topSite['preselect']);
+                $extracted = $vision->extractInvoice($files);
 
-                    $lineData = [
-                        'line_id' => (string) Str::uuid(),
-                        'invoice_document_id' => $documentId,
-                        'site_id' => $sitePreselect ? $topSite['id'] : '',
-                        'site_name' => $sitePreselect ? $topSite['name'] : '',
-                        'site_name_raw' => $extractedLine['site_name'] ?? '',
-                        'amount' => $extractedLine['amount'] ?? '',
-                        'amount_with_tax' => $extractedLine['amount_with_tax'] ?? '',
-                    ];
+                Log::info('Invoice extraction result.', [
+                    'document_id' => $documentId,
+                    'extracted' => $extracted,
+                ]);
 
-                    $this->appendLine($lineData);
-                    $lines[] = $lineData + ['candidates' => $siteCandidates];
+                if ($extracted === null) {
+                    $document['status'] = 'ERROR';
+                } else {
+                    $warnings = $validator->validate($extracted);
+                    $vendorCandidates = $matcher->candidatesForSubcontractor($extracted['vendor_name'] ?? null);
+                    $topVendor = $vendorCandidates[0] ?? null;
+                    $vendorPreselect = $topVendor && ! empty($topVendor['preselect']);
+
+                    $document['vendor_name_raw'] = $extracted['vendor_name'] ?? '';
+                    $document['issue_date'] = $extracted['issue_date'] ?? '';
+                    $document['billing_month'] = $extracted['billing_month'] ?? '';
+                    $document['document_type'] = $extracted['document_type'] ?? '';
+                    $document['subtotal'] = $extracted['subtotal'] ?? '';
+                    $document['tax_amount'] = $extracted['tax_amount'] ?? '';
+                    $document['total_with_tax'] = $extracted['total_with_tax'] ?? '';
+                    $document['ocr_result_raw'] = json_encode($extracted, JSON_UNESCAPED_UNICODE);
+                    $document['status'] = 'NEEDS_REVIEW';
+                    $document['warnings'] = $warnings;
+                    $document['subcontractor_id'] = $vendorPreselect ? $topVendor['id'] : '';
+                    $document['subcontractor_name'] = $vendorPreselect ? $topVendor['name'] : '';
+
+                    foreach (($extracted['lines'] ?? []) as $extractedLine) {
+                        $siteCandidates = $matcher->candidatesForSite($extractedLine['site_name'] ?? null);
+                        $topSite = $siteCandidates[0] ?? null;
+                        $sitePreselect = $topSite && ! empty($topSite['preselect']);
+
+                        $lineData = [
+                            'line_id' => (string) Str::uuid(),
+                            'invoice_document_id' => $documentId,
+                            'site_id' => $sitePreselect ? $topSite['id'] : '',
+                            'site_name' => $sitePreselect ? $topSite['name'] : '',
+                            'site_name_raw' => $extractedLine['site_name'] ?? '',
+                            'amount' => $extractedLine['amount'] ?? '',
+                            'amount_with_tax' => $extractedLine['amount_with_tax'] ?? '',
+                        ];
+
+                        $this->appendLine($lineData);
+                        $lines[] = $lineData + ['candidates' => $siteCandidates];
+                    }
+                }
+
+                if ($located) {
+                    $this->updateInvoiceDocumentAt($located['rowNumber'], $document);
                 }
             }
+        } catch (\Throwable $e) {
+            Log::error('Failed to save invoice document to the spreadsheet.', [
+                'document_id' => $documentId,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
 
-            if ($located) {
-                $this->updateInvoiceDocumentAt($located['rowNumber'], $document);
-            }
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to save invoice document.',
+                'error' => $e->getMessage(),
+            ], 500);
         }
+
+        Log::info('Invoice document saved.', [
+            'document_id' => $documentId,
+            'status' => $document['status'],
+            'line_count' => count($lines),
+        ]);
 
         event(new InvoiceDocumentEvent($document, strtolower($document['status'])));
 

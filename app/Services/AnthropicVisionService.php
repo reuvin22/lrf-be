@@ -94,6 +94,7 @@ PROMPT;
         foreach ($files as $file) {
             if (isset($file['text'])) {
                 $content[] = ['type' => 'text', 'text' => $file['text']];
+
                 continue;
             }
 
@@ -144,10 +145,23 @@ PROMPT;
 
             $text = $response->json('content.0.text');
             if (! is_string($text) || trim($text) === '') {
+                Log::warning('Anthropic invoice extraction returned no text.', [
+                    'stop_reason' => $response->json('stop_reason'),
+                    'body' => $response->body(),
+                ]);
+
                 return null;
             }
 
-            return $this->parseJson($text);
+            $result = $this->parseJson($text);
+
+            if ($result === null) {
+                Log::warning('Anthropic invoice extraction returned unparsable JSON.', ['text' => $text]);
+            } else {
+                Log::info('Anthropic invoice extraction succeeded.', ['result' => $result]);
+            }
+
+            return $result;
         } catch (\Throwable $e) {
             Log::error('Anthropic invoice extraction threw.', ['error' => $e->getMessage()]);
 
