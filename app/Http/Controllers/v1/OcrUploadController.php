@@ -114,10 +114,11 @@ class OcrUploadController extends SheetResourceController
         unset($data['image_base64'], $data['images_base64'], $data['previous_image_paths'], $data['use_vision']);
 
         try {
-            // Write the row as PROCESSING and dispatch extraction to the queue
-            // instead of calling Claude inline — that call can take up to ~120s,
-            // which blew past the frontend's request timeout when done
-            // synchronously. The queued job updates this row once it's done.
+            // Write the row as PROCESSING and defer extraction to run right
+            // after this response is sent (afterResponse() — no queue/worker
+            // needed, this app has no real database) instead of calling Claude
+            // inline: that call can take up to ~120s, which blew past the
+            // frontend's request timeout when done synchronously.
             $runsVision = ! empty($paths) && $vision->isEnabled();
             if ($runsVision) {
                 $data['status'] = 'PROCESSING';
@@ -127,7 +128,7 @@ class OcrUploadController extends SheetResourceController
             $this->appendRow($data);
 
             if ($runsVision) {
-                ExtractOcrUpload::dispatch($data['upload_id'], $paths);
+                ExtractOcrUpload::dispatch($data['upload_id'], $paths)->afterResponse();
             }
 
             return response()->json([
@@ -200,9 +201,9 @@ class OcrUploadController extends SheetResourceController
 
             unset($data['image_base64'], $data['images_base64'], $data['previous_image_paths'], $data['use_vision']);
 
-            // Same PROCESSING → queued-extraction pattern as store(): persist
-            // the in-progress state and let the job (re-fetching every current
-            // page, kept + new, from Firebase) do the ~120s Claude call.
+            // Same PROCESSING → deferred-extraction pattern as store(): persist
+            // the in-progress state and let the afterResponse() job (re-fetching
+            // every current page, kept + new, from Firebase) do the ~120s Claude call.
             $runsVision = ! empty($finalPaths) && $vision->isEnabled();
             if ($runsVision) {
                 $data['status'] = 'PROCESSING';
@@ -215,7 +216,7 @@ class OcrUploadController extends SheetResourceController
             $this->updateRowAt($located['rowNumber'], $merged);
 
             if ($runsVision) {
-                ExtractOcrUpload::dispatch($id, $finalPaths);
+                ExtractOcrUpload::dispatch($id, $finalPaths)->afterResponse();
             }
 
             return response()->json([
@@ -675,19 +676,21 @@ class OcrUploadController extends SheetResourceController
                 $document['status'] = 'NEEDS_REVIEW';
                 $document['warnings'] = ['LLM extraction is not configured; please enter details manually.'];
             } else {
-                // Write the row as PROCESSING and dispatch extraction to the
-                // queue instead of calling Claude inline — that call can take
-                // up to ~120s, which blew past the frontend's request timeout
-                // when done synchronously. The queued job re-fetches these
-                // files by URL, does the Claude call, appends InvoiceLines,
-                // and updates this row (+ fires InvoiceDocumentEvent) once done.
+                // Write the row as PROCESSING and defer extraction to run right
+                // after this response is sent (afterResponse() — no queue/worker
+                // needed, this app has no real database) instead of calling
+                // Claude inline: that call can take up to ~120s, which blew past
+                // the frontend's request timeout when done synchronously. The
+                // deferred job re-fetches these files by URL, does the Claude
+                // call, appends InvoiceLines, and updates this row (+ fires
+                // InvoiceDocumentEvent) once done.
                 $document['status'] = 'PROCESSING';
             }
 
             $this->appendInvoiceDocument($document);
 
             if ($runsVision) {
-                ExtractInvoiceDocument::dispatch($documentId, $filePaths);
+                ExtractInvoiceDocument::dispatch($documentId, $filePaths)->afterResponse();
             }
         } catch (\Throwable $e) {
             Log::error('Failed to save invoice document to the spreadsheet.', [

@@ -13,8 +13,12 @@ use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Runs the Claude Vision extraction for one OcrUploads row off the request
- * thread — the HTTP request only uploads the file(s) and writes a PROCESSING
+ * Runs the Claude Vision extraction for one OcrUploads row after the HTTP
+ * response has already been sent (dispatched with ->afterResponse() — this
+ * app has no real database/Redis, so there's no persistent queue worker;
+ * Laravel runs ShouldQueue jobs dispatched this way in-process via the
+ * built-in "sync" connection instead, which still preserves $tries/failed()
+ * handling). The request only uploads the file(s) and writes a PROCESSING
  * row; this job does the (up to ~120s) Claude call and updates that row with
  * the result. Mirrors OcrUploadController's now-removed extractOcr()/
  * deriveAmount() logic.

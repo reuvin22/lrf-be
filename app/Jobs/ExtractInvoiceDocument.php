@@ -17,8 +17,12 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 /**
- * Runs the Claude Vision extraction for one InvoiceDocuments row off the
- * request thread — the HTTP request only uploads the file(s) and writes a
+ * Runs the Claude Vision extraction for one InvoiceDocuments row after the
+ * HTTP response has already been sent (dispatched with ->afterResponse() —
+ * this app has no real database/Redis, so there's no persistent queue
+ * worker; Laravel runs ShouldQueue jobs dispatched this way in-process via
+ * the built-in "sync" connection instead, which still preserves $tries/
+ * failed() handling). The request only uploads the file(s) and writes a
  * PROCESSING row; this job does the (up to ~120s) Claude call, runs
  * vendor/site matching, appends InvoiceLines rows, and updates the document
  * row. Mirrors OcrUploadController::invoiceStore()'s now-removed vision
