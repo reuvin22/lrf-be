@@ -8,20 +8,17 @@ use App\Http\Requests\v1\InvoiceDocumentRequest;
 use App\Http\Requests\v1\InvoiceDocumentUpdateRequest;
 use App\Http\Requests\v1\OcrUploadRequest;
 use App\Http\Requests\v1\OcrUploadReviewRequest;
+use App\Jobs\ExtractInvoiceDocument;
+use App\Jobs\ExtractOcrUpload;
 use App\Services\AnthropicVisionService;
 use App\Services\FirebaseService;
-use App\Services\InvoiceExtractionValidator;
 use App\Services\InvoiceNameMatchingService;
 use Carbon\Carbon;
 use Google\Cloud\Storage\Bucket;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
-use PhpOffice\PhpWord\Element\Table;
-use PhpOffice\PhpWord\Element\Text;
-use PhpOffice\PhpWord\IOFactory;
 
 class OcrUploadController extends SheetResourceController
 {
@@ -45,16 +42,6 @@ class OcrUploadController extends SheetResourceController
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // .docx
         'application/vnd.ms-excel', // legacy .xls
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // .xlsx
-        'text/csv',
-    ];
-
-    // Claude's vision API only accepts images and PDFs as attachments — these
-    // mime types have their text extracted server-side instead and sent as a
-    // plain text block (see buildVisionFile()).
-    private const TEXT_EXTRACTED_MIME_TYPES = [
-        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-        'application/vnd.ms-excel',
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         'text/csv',
     ];
 
@@ -112,7 +99,7 @@ class OcrUploadController extends SheetResourceController
         $data = $request->validated();
         $data['upload_id'] = (string) Str::uuid();
         $rawImages = $this->collectNewImages($data);
-        $visionFiles = [];
+        $paths = [];
 
         if (! empty($rawImages)) {
             $result = $this->processNewImages($firebase, $rawImages, $data['uploaded_by'] ?? 'unknown');
@@ -120,17 +107,18 @@ class OcrUploadController extends SheetResourceController
                 return $result;
             }
 
-            $data['image_path'] = $this->normalizePaths($result['paths']);
-            $visionFiles = $result['files'];
+            $paths = $result;
+            $data['image_path'] = $this->normalizePaths($paths);
         }
 
         unset($data['image_base64'], $data['images_base64'], $data['previous_image_paths'], $data['use_vision']);
 
         try {
-            // Write the row as PROCESSING before calling the LLM, then update it
-            // once extraction finishes, so other clients polling the list see the
-            // in-progress state rather than the row appearing only after OCR completes.
-            $runsVision = ! empty($visionFiles) && $vision->isEnabled();
+            // Write the row as PROCESSING and dispatch extraction to the queue
+            // instead of calling Claude inline — that call can take up to ~120s,
+            // which blew past the frontend's request timeout when done
+            // synchronously. The queued job updates this row once it's done.
+            $runsVision = ! empty($paths) && $vision->isEnabled();
             if ($runsVision) {
                 $data['status'] = 'PROCESSING';
             }
@@ -139,13 +127,7 @@ class OcrUploadController extends SheetResourceController
             $this->appendRow($data);
 
             if ($runsVision) {
-                $located = $this->locate($data['upload_id']);
-                $data = array_merge($data, $this->extractOcr($vision, $visionFiles));
-                $data = $this->resolveNames($data);
-
-                if ($located) {
-                    $this->updateRowAt($located['rowNumber'], $data);
-                }
+                ExtractOcrUpload::dispatch($data['upload_id'], $paths);
             }
 
             return response()->json([
@@ -181,7 +163,6 @@ class OcrUploadController extends SheetResourceController
         // by the user and must be deleted from Firebase.
         $touchesImages = array_key_exists('images_base64', $data) || array_key_exists('previous_image_paths', $data);
         $finalPaths = [];
-        $visionFiles = [];
 
         try {
             $bucket = $firebase->storage()->getBucket();
@@ -200,8 +181,7 @@ class OcrUploadController extends SheetResourceController
                         return $result;
                     }
 
-                    $newPaths = $result['paths'];
-                    $visionFiles = $result['files'];
+                    $newPaths = $result;
                 }
 
                 $finalPaths = array_values(array_merge($keepPaths, $newPaths));
@@ -213,17 +193,6 @@ class OcrUploadController extends SheetResourceController
                     $data['ocr_result_raw'] = null;
                 } else {
                     $data['image_path'] = $this->normalizePaths($finalPaths);
-
-                    // Kept images only have their Firebase URL, not the raw
-                    // bytes — re-fetch them so the whole document (kept +
-                    // new pages) gets re-extracted together, same as the
-                    // "multi-page = one document" behavior on create.
-                    foreach ($keepPaths as $keepPath) {
-                        $file = $this->fetchAsVisionFile($keepPath);
-                        if ($file !== null) {
-                            $visionFiles[] = $file;
-                        }
-                    }
                 }
             } else {
                 unset($data['image_path']);
@@ -231,9 +200,10 @@ class OcrUploadController extends SheetResourceController
 
             unset($data['image_base64'], $data['images_base64'], $data['previous_image_paths'], $data['use_vision']);
 
-            // Same PROCESSING → (PENDING|ERROR) two-write pattern as store():
-            // persist the in-progress state before calling the LLM.
-            $runsVision = ! empty($visionFiles) && $vision->isEnabled();
+            // Same PROCESSING → queued-extraction pattern as store(): persist
+            // the in-progress state and let the job (re-fetching every current
+            // page, kept + new, from Firebase) do the ~120s Claude call.
+            $runsVision = ! empty($finalPaths) && $vision->isEnabled();
             if ($runsVision) {
                 $data['status'] = 'PROCESSING';
             }
@@ -245,9 +215,7 @@ class OcrUploadController extends SheetResourceController
             $this->updateRowAt($located['rowNumber'], $merged);
 
             if ($runsVision) {
-                $merged = array_merge($merged, $this->extractOcr($vision, $visionFiles));
-                $merged = $this->resolveNames($merged);
-                $this->updateRowAt($located['rowNumber'], $merged);
+                ExtractOcrUpload::dispatch($id, $finalPaths);
             }
 
             return response()->json([
@@ -418,74 +386,6 @@ class OcrUploadController extends SheetResourceController
     }
 
     /**
-     * Send every page/shot of one OCR upload (images, PDFs, and/or
-     * extracted-text entries from DOCX/Excel/CSV) to Claude in a single
-     * request — multi-page/multi-shot = one document, same as the
-     * invoice-document pipeline. Returns the OCR result columns to merge
-     * into the row, or an empty array when the LLM is skipped (so the
-     * upload still succeeds).
-     *
-     * Fills three columns:
-     *   - ocr_result_raw    → the full extraction JSON
-     *   - ocr_result_amount → total_with_tax, falling back to subtotal or the sum of lines
-     *   - ocr_result_date   → the extracted issue_date
-     *
-     * @param  array<int, array{media_type: string, base64?: string, text?: string}>  $files
-     * @return array<string, mixed>
-     */
-    private function extractOcr(AnthropicVisionService $vision, array $files): array
-    {
-        $files = array_values(array_filter($files));
-
-        if (! $vision->isEnabled() || empty($files)) {
-            return [];
-        }
-
-        $extracted = $vision->extractInvoice($files);
-
-        if ($extracted === null) {
-            return [
-                'status' => 'ERROR',
-                'processed_at' => Carbon::now('Asia/Manila')->toDateTimeString(),
-            ];
-        }
-
-        return [
-            'ocr_result_raw' => json_encode($extracted, JSON_UNESCAPED_UNICODE),
-            'ocr_result_amount' => $this->deriveAmount($extracted) ?: null,
-            'ocr_result_date' => $extracted['issue_date'] ?? null,
-            // PENDING here means "extraction finished, awaiting human review"
-            // — see the review() action above for the approve/reject step.
-            'status' => 'PENDING',
-            'processed_at' => Carbon::now('Asia/Manila')->toDateTimeString(),
-        ];
-    }
-
-    /**
-     * ocr_uploads only has a single amount column (unlike invoice_documents'
-     * subtotal/tax/total split), so collapse the richer extraction down to
-     * one number: prefer the tax-inclusive total, then the tax-exclusive
-     * subtotal, then fall back to summing the extracted lines.
-     */
-    private function deriveAmount(array $extracted): ?int
-    {
-        if (is_numeric($extracted['total_with_tax'] ?? null)) {
-            return (int) $extracted['total_with_tax'];
-        }
-
-        if (is_numeric($extracted['subtotal'] ?? null)) {
-            return (int) $extracted['subtotal'];
-        }
-
-        $lineSum = array_sum(array_map(
-            fn ($line) => (float) ($line['amount_with_tax'] ?? $line['amount'] ?? 0),
-            $extracted['lines'] ?? []
-        ));
-
-        return $lineSum > 0 ? (int) $lineSum : null;
-    }
-
-    /**
      * Pull the newly-added images out of the validated request data. Accepts
      * either `images_base64` (array of base64/data-URI strings — the current
      * frontend contract) or the legacy single `image_base64` field —
@@ -572,11 +472,14 @@ class OcrUploadController extends SheetResourceController
      * @param  array<int, string>  $rawImages
      * @return array{paths: array<int, string>, files: array<int, array{media_type: string, base64?: string, text?: string}>}|JsonResponse
      */
+    /**
+     * @param  array<int, string>  $rawImages
+     * @return array<int, string>|JsonResponse
+     */
     private function processNewImages(FirebaseService $firebase, array $rawImages, string $uploadedBy): array|JsonResponse
     {
         $bucket = $firebase->storage()->getBucket();
         $paths = [];
-        $files = [];
 
         foreach ($rawImages as $index => $dataUri) {
             $decoded = $this->decodeImage($dataUri);
@@ -593,142 +496,9 @@ class OcrUploadController extends SheetResourceController
             }
 
             $paths[] = $uploaded;
-            $files[] = $this->buildVisionFile($decoded);
         }
 
-        return ['paths' => $paths, 'files' => $files];
-    }
-
-    /**
-     * Build one Claude-ready file entry from a decoded upload. Images and
-     * PDFs go straight through as base64 attachments (what Claude's vision
-     * API accepts natively); DOCX/Excel/CSV have no such support, so their
-     * text is extracted server-side first and sent as a plain text block.
-     *
-     * @param  array{mime: string, base64: string}  $decoded
-     * @return array{media_type: string, base64?: string, text?: string}
-     */
-    private function buildVisionFile(array $decoded): array
-    {
-        if (! in_array($decoded['mime'], self::TEXT_EXTRACTED_MIME_TYPES, true)) {
-            return ['media_type' => $decoded['mime'], 'base64' => $decoded['base64']];
-        }
-
-        $raw = base64_decode($decoded['base64']);
-
-        $text = match ($decoded['mime']) {
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => $this->extractDocxText($raw),
-            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' => $this->extractSpreadsheetText($raw, 'xlsx'),
-            'application/vnd.ms-excel' => $this->extractSpreadsheetText($raw, 'xls'),
-            'text/csv' => $this->extractCsvText($raw),
-            default => '',
-        };
-
-        return ['media_type' => 'text/plain', 'text' => $text];
-    }
-
-    /**
-     * Extract plain text from a .docx file via PhpWord. Covers paragraphs,
-     * text runs, and table cells — good enough for an OCR prefill, not a
-     * full-fidelity document reader.
-     */
-    private function extractDocxText(string $raw): string
-    {
-        $tmpBase = tempnam(sys_get_temp_dir(), 'ocr_docx_');
-        unlink($tmpBase);
-        $tmpPath = $tmpBase.'.docx';
-        file_put_contents($tmpPath, $raw);
-
-        try {
-            $phpWord = IOFactory::load($tmpPath);
-            $lines = [];
-
-            foreach ($phpWord->getSections() as $section) {
-                $this->collectPhpWordText($section, $lines);
-            }
-
-            return trim(implode("\n", $lines));
-        } catch (\Throwable $e) {
-            Log::warning('DOCX text extraction failed.', ['error' => $e->getMessage()]);
-
-            return '';
-        } finally {
-            @unlink($tmpPath);
-        }
-    }
-
-    /**
-     * @param  array<int, string>  $lines
-     */
-    private function collectPhpWordText(mixed $container, array &$lines): void
-    {
-        if (! method_exists($container, 'getElements')) {
-            return;
-        }
-
-        foreach ($container->getElements() as $element) {
-            if ($element instanceof Text) {
-                $lines[] = $element->getText();
-            } elseif ($element instanceof Table) {
-                foreach ($element->getRows() as $row) {
-                    foreach ($row->getCells() as $cell) {
-                        $this->collectPhpWordText($cell, $lines);
-                    }
-                }
-            } elseif (method_exists($element, 'getElements')) {
-                $this->collectPhpWordText($element, $lines);
-            }
-        }
-    }
-
-    /**
-     * Extract every sheet's cells as tab-separated text via PhpSpreadsheet.
-     */
-    private function extractSpreadsheetText(string $raw, string $extension): string
-    {
-        $tmpBase = tempnam(sys_get_temp_dir(), 'ocr_xls_');
-        unlink($tmpBase);
-        $tmpPath = $tmpBase.'.'.$extension;
-        file_put_contents($tmpPath, $raw);
-
-        try {
-            $spreadsheet = \PhpOffice\PhpSpreadsheet\IOFactory::load($tmpPath);
-            $lines = [];
-
-            foreach ($spreadsheet->getAllSheets() as $sheet) {
-                foreach ($sheet->toArray(null, true, true, false) as $row) {
-                    $line = implode("\t", array_map(fn ($cell) => trim((string) ($cell ?? '')), $row));
-                    if ($line !== '') {
-                        $lines[] = $line;
-                    }
-                }
-            }
-
-            return trim(implode("\n", $lines));
-        } catch (\Throwable $e) {
-            Log::warning('Spreadsheet text extraction failed.', ['error' => $e->getMessage()]);
-
-            return '';
-        } finally {
-            @unlink($tmpPath);
-        }
-    }
-
-    /**
-     * CSV is already plain text — just normalize the encoding. Japanese CSV
-     * exports are frequently Shift-JIS rather than UTF-8, so detect and
-     * convert when needed.
-     */
-    private function extractCsvText(string $raw): string
-    {
-        if (! mb_check_encoding($raw, 'UTF-8')) {
-            $detected = mb_detect_encoding($raw, ['UTF-8', 'SJIS-win', 'SJIS', 'EUC-JP'], true);
-            if ($detected && $detected !== 'UTF-8') {
-                $raw = mb_convert_encoding($raw, 'UTF-8', $detected);
-            }
-        }
-
-        return trim($raw);
+        return $paths;
     }
 
     /**
@@ -797,52 +567,6 @@ class OcrUploadController extends SheetResourceController
         }
     }
 
-    /**
-     * Re-download an already-uploaded (kept) file so it can be included in a
-     * fresh Claude extraction alongside newly-added pages. Best-effort —
-     * returns null on any failure so one unreachable file doesn't fail the
-     * whole update.
-     *
-     * @return array{media_type: string, base64?: string, text?: string}|null
-     */
-    private function fetchAsVisionFile(string $url): ?array
-    {
-        try {
-            $response = Http::timeout(30)->get($url);
-            if (! $response->successful()) {
-                return null;
-            }
-
-            $mime = strtolower((string) $response->header('Content-Type')) ?: $this->guessMimeFromUrl($url);
-            $mime = strtok($mime, ';'); // strip a "; charset=..." suffix if present
-
-            if (! in_array($mime, self::ALLOWED_MIME_TYPES, true)) {
-                return null;
-            }
-
-            return $this->buildVisionFile(['mime' => $mime, 'base64' => base64_encode($response->body())]);
-        } catch (\Throwable $e) {
-            Log::warning('Failed to re-fetch kept image for OCR re-extraction.', ['url' => $url, 'error' => $e->getMessage()]);
-
-            return null;
-        }
-    }
-
-    private function guessMimeFromUrl(string $url): string
-    {
-        $extension = strtolower(pathinfo(parse_url($url, PHP_URL_PATH) ?? '', PATHINFO_EXTENSION));
-
-        return match ($extension) {
-            'pdf' => 'application/pdf',
-            'png' => 'image/png',
-            'docx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            'xlsx' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            'xls' => 'application/vnd.ms-excel',
-            'csv' => 'text/csv',
-            default => 'image/jpeg',
-        };
-    }
-
     // ===========================================================================
     // Invoice documents — CRUD + confirm (1 upload = 1 document, 1 document = N
     // site lines). See the constants block above for the sheet/header layout.
@@ -902,16 +626,13 @@ class OcrUploadController extends SheetResourceController
     public function invoiceStore(
         InvoiceDocumentRequest $request,
         FirebaseService $firebase,
-        AnthropicVisionService $vision,
-        InvoiceNameMatchingService $matcher,
-        InvoiceExtractionValidator $validator
+        AnthropicVisionService $vision
     ): JsonResponse {
         $data = $request->validated();
         $documentId = (string) Str::uuid();
         $uploadedBy = $data['uploaded_by'] ?? null;
         $now = Carbon::now('Asia/Manila');
 
-        $files = [];
         $filePaths = [];
 
         foreach ($data['files'] as $i => $file) {
@@ -929,7 +650,6 @@ class OcrUploadController extends SheetResourceController
             }
 
             $filePaths[] = $uploaded;
-            $files[] = ['media_type' => $decoded['mime'], 'base64' => $decoded['base64']];
         }
 
         $document = [
@@ -942,14 +662,11 @@ class OcrUploadController extends SheetResourceController
             'processed_at' => $now->toDateTimeString(),
         ];
 
-        $lines = [];
-        $vendorCandidates = [];
-        $extracted = null;
         $runsVision = $vision->isEnabled();
 
         Log::info('Invoice document upload received.', [
             'document_id' => $documentId,
-            'file_count' => count($files),
+            'file_count' => count($filePaths),
             'vision_enabled' => $runsVision,
         ]);
 
@@ -957,67 +674,20 @@ class OcrUploadController extends SheetResourceController
             if (! $runsVision) {
                 $document['status'] = 'NEEDS_REVIEW';
                 $document['warnings'] = ['LLM extraction is not configured; please enter details manually.'];
-                $this->appendInvoiceDocument($document);
             } else {
-                // Write the row as PROCESSING before calling the LLM, then update
-                // it once extraction finishes, so other clients polling the list
-                // see the in-progress state rather than the row appearing only
-                // after extraction completes.
+                // Write the row as PROCESSING and dispatch extraction to the
+                // queue instead of calling Claude inline — that call can take
+                // up to ~120s, which blew past the frontend's request timeout
+                // when done synchronously. The queued job re-fetches these
+                // files by URL, does the Claude call, appends InvoiceLines,
+                // and updates this row (+ fires InvoiceDocumentEvent) once done.
                 $document['status'] = 'PROCESSING';
-                $this->appendInvoiceDocument($document);
-                $located = $this->locateInvoiceDocument($documentId);
+            }
 
-                $extracted = $vision->extractInvoice($files);
+            $this->appendInvoiceDocument($document);
 
-                Log::info('Invoice extraction result.', [
-                    'document_id' => $documentId,
-                    'extracted' => $extracted,
-                ]);
-
-                if ($extracted === null) {
-                    $document['status'] = 'ERROR';
-                } else {
-                    $warnings = $validator->validate($extracted);
-                    $vendorCandidates = $matcher->candidatesForSubcontractor($extracted['vendor_name'] ?? null);
-                    $topVendor = $vendorCandidates[0] ?? null;
-                    $vendorPreselect = $topVendor && ! empty($topVendor['preselect']);
-
-                    $document['vendor_name_raw'] = $extracted['vendor_name'] ?? '';
-                    $document['issue_date'] = $extracted['issue_date'] ?? '';
-                    $document['billing_month'] = $extracted['billing_month'] ?? '';
-                    $document['document_type'] = $extracted['document_type'] ?? '';
-                    $document['subtotal'] = $extracted['subtotal'] ?? '';
-                    $document['tax_amount'] = $extracted['tax_amount'] ?? '';
-                    $document['total_with_tax'] = $extracted['total_with_tax'] ?? '';
-                    $document['ocr_result_raw'] = json_encode($extracted, JSON_UNESCAPED_UNICODE);
-                    $document['status'] = 'NEEDS_REVIEW';
-                    $document['warnings'] = $warnings;
-                    $document['subcontractor_id'] = $vendorPreselect ? $topVendor['id'] : '';
-                    $document['subcontractor_name'] = $vendorPreselect ? $topVendor['name'] : '';
-
-                    foreach (($extracted['lines'] ?? []) as $extractedLine) {
-                        $siteCandidates = $matcher->candidatesForSite($extractedLine['site_name'] ?? null);
-                        $topSite = $siteCandidates[0] ?? null;
-                        $sitePreselect = $topSite && ! empty($topSite['preselect']);
-
-                        $lineData = [
-                            'line_id' => (string) Str::uuid(),
-                            'invoice_document_id' => $documentId,
-                            'site_id' => $sitePreselect ? $topSite['id'] : '',
-                            'site_name' => $sitePreselect ? $topSite['name'] : '',
-                            'site_name_raw' => $extractedLine['site_name'] ?? '',
-                            'amount' => $extractedLine['amount'] ?? '',
-                            'amount_with_tax' => $extractedLine['amount_with_tax'] ?? '',
-                        ];
-
-                        $this->appendLine($lineData);
-                        $lines[] = $lineData + ['candidates' => $siteCandidates];
-                    }
-                }
-
-                if ($located) {
-                    $this->updateInvoiceDocumentAt($located['rowNumber'], $document);
-                }
+            if ($runsVision) {
+                ExtractInvoiceDocument::dispatch($documentId, $filePaths);
             }
         } catch (\Throwable $e) {
             Log::error('Failed to save invoice document to the spreadsheet.', [
@@ -1036,7 +706,6 @@ class OcrUploadController extends SheetResourceController
         Log::info('Invoice document saved.', [
             'document_id' => $documentId,
             'status' => $document['status'],
-            'line_count' => count($lines),
         ]);
 
         event(new InvoiceDocumentEvent($document, strtolower($document['status'])));
@@ -1045,9 +714,9 @@ class OcrUploadController extends SheetResourceController
             'success' => true,
             'message' => 'Invoice document created successfully.',
             'data' => $document + [
-                'lines' => $lines,
-                'vendor_candidates' => $vendorCandidates,
-                'claude_response' => $extracted,
+                'lines' => [],
+                'vendor_candidates' => [],
+                'claude_response' => null,
             ],
         ], 201);
     }

@@ -4,6 +4,9 @@ namespace App\Services;
 
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use PhpOffice\PhpWord\Element\Table;
+use PhpOffice\PhpWord\Element\Text;
+use PhpOffice\PhpWord\IOFactory;
 
 /**
  * Thin wrapper around the Anthropic Messages API for invoice LLM-vision
@@ -14,6 +17,29 @@ use Illuminate\Support\Facades\Log;
 class AnthropicVisionService
 {
     private const API_URL = 'https://api.anthropic.com/v1/messages';
+
+    // The superset of file types either upload flow (ocr-uploads or
+    // invoice-documents) may have stored. A URL that was validated as
+    // image/pdf at upload time will never actually resolve to a docx/xlsx/csv
+    // body, so sharing one broad allowlist across both callers is harmless.
+    private const ALLOWED_MIME_TYPES = [
+        'image/jpeg', 'image/png', 'image/webp', 'image/gif',
+        'application/pdf',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // .docx
+        'application/vnd.ms-excel', // legacy .xls
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // .xlsx
+        'text/csv',
+    ];
+
+    // Claude's vision API only accepts images and PDFs as attachments — these
+    // mime types have their text extracted server-side instead and sent as a
+    // plain text block (see buildVisionFile()).
+    private const TEXT_EXTRACTED_MIME_TYPES = [
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'application/vnd.ms-excel',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'text/csv',
+    ];
 
     // Refined against the real April 2026 sample invoices — kept verbatim in
     // Japanese. Do not translate: field-name anchoring works better in the
@@ -191,5 +217,202 @@ PROMPT;
         }
 
         return $decoded;
+    }
+
+    // -------------------------------------------------------------------------
+    // Stored-file → vision-file conversion. Used by the queued extraction jobs
+    // (ExtractOcrUpload, ExtractInvoiceDocument) to turn the Firebase URLs a
+    // row already has into the format extractInvoice() expects, without
+    // needing the original upload request's raw bytes.
+    // -------------------------------------------------------------------------
+
+    /**
+     * Re-download every given public file URL and convert each into a
+     * Claude-ready vision file. Skips (rather than fails on) any URL that's
+     * unreachable or not a supported type — one bad page shouldn't sink the
+     * whole document.
+     *
+     * @param  array<int, string>  $urls
+     * @return array<int, array{media_type: string, base64?: string, text?: string}>
+     */
+    public function filesFromUrls(array $urls): array
+    {
+        return array_values(array_filter(array_map(
+            fn ($url) => $this->fetchAsVisionFile($url),
+            $urls
+        )));
+    }
+
+    /**
+     * @return array{media_type: string, base64?: string, text?: string}|null
+     */
+    private function fetchAsVisionFile(string $url): ?array
+    {
+        try {
+            $response = Http::timeout(30)->get($url);
+            if (! $response->successful()) {
+                return null;
+            }
+
+            $mime = strtolower((string) $response->header('Content-Type')) ?: $this->guessMimeFromUrl($url);
+            $mime = strtok($mime, ';'); // strip a "; charset=..." suffix if present
+
+            if (! in_array($mime, self::ALLOWED_MIME_TYPES, true)) {
+                return null;
+            }
+
+            return $this->buildVisionFile(['mime' => $mime, 'base64' => base64_encode($response->body())]);
+        } catch (\Throwable $e) {
+            Log::warning('Failed to re-fetch stored file for extraction.', ['url' => $url, 'error' => $e->getMessage()]);
+
+            return null;
+        }
+    }
+
+    private function guessMimeFromUrl(string $url): string
+    {
+        $extension = strtolower(pathinfo(parse_url($url, PHP_URL_PATH) ?? '', PATHINFO_EXTENSION));
+
+        return match ($extension) {
+            'pdf' => 'application/pdf',
+            'png' => 'image/png',
+            'docx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'xlsx' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'xls' => 'application/vnd.ms-excel',
+            'csv' => 'text/csv',
+            default => 'image/jpeg',
+        };
+    }
+
+    /**
+     * Build one Claude-ready file entry from a decoded file. Images and PDFs
+     * go straight through as base64 attachments (what Claude's vision API
+     * accepts natively); DOCX/Excel/CSV have no such support, so their text
+     * is extracted server-side first and sent as a plain text block.
+     *
+     * @param  array{mime: string, base64: string}  $decoded
+     * @return array{media_type: string, base64?: string, text?: string}
+     */
+    private function buildVisionFile(array $decoded): array
+    {
+        if (! in_array($decoded['mime'], self::TEXT_EXTRACTED_MIME_TYPES, true)) {
+            return ['media_type' => $decoded['mime'], 'base64' => $decoded['base64']];
+        }
+
+        $raw = base64_decode($decoded['base64']);
+
+        $text = match ($decoded['mime']) {
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => $this->extractDocxText($raw),
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' => $this->extractSpreadsheetText($raw, 'xlsx'),
+            'application/vnd.ms-excel' => $this->extractSpreadsheetText($raw, 'xls'),
+            'text/csv' => $this->extractCsvText($raw),
+            default => '',
+        };
+
+        return ['media_type' => 'text/plain', 'text' => $text];
+    }
+
+    /**
+     * Extract plain text from a .docx file via PhpWord. Covers paragraphs,
+     * text runs, and table cells — good enough for an OCR prefill, not a
+     * full-fidelity document reader.
+     */
+    private function extractDocxText(string $raw): string
+    {
+        $tmpBase = tempnam(sys_get_temp_dir(), 'ocr_docx_');
+        unlink($tmpBase);
+        $tmpPath = $tmpBase.'.docx';
+        file_put_contents($tmpPath, $raw);
+
+        try {
+            $phpWord = IOFactory::load($tmpPath);
+            $lines = [];
+
+            foreach ($phpWord->getSections() as $section) {
+                $this->collectPhpWordText($section, $lines);
+            }
+
+            return trim(implode("\n", $lines));
+        } catch (\Throwable $e) {
+            Log::warning('DOCX text extraction failed.', ['error' => $e->getMessage()]);
+
+            return '';
+        } finally {
+            @unlink($tmpPath);
+        }
+    }
+
+    /**
+     * @param  array<int, string>  $lines
+     */
+    private function collectPhpWordText(mixed $container, array &$lines): void
+    {
+        if (! method_exists($container, 'getElements')) {
+            return;
+        }
+
+        foreach ($container->getElements() as $element) {
+            if ($element instanceof Text) {
+                $lines[] = $element->getText();
+            } elseif ($element instanceof Table) {
+                foreach ($element->getRows() as $row) {
+                    foreach ($row->getCells() as $cell) {
+                        $this->collectPhpWordText($cell, $lines);
+                    }
+                }
+            } elseif (method_exists($element, 'getElements')) {
+                $this->collectPhpWordText($element, $lines);
+            }
+        }
+    }
+
+    /**
+     * Extract every sheet's cells as tab-separated text via PhpSpreadsheet.
+     */
+    private function extractSpreadsheetText(string $raw, string $extension): string
+    {
+        $tmpBase = tempnam(sys_get_temp_dir(), 'ocr_xls_');
+        unlink($tmpBase);
+        $tmpPath = $tmpBase.'.'.$extension;
+        file_put_contents($tmpPath, $raw);
+
+        try {
+            $spreadsheet = \PhpOffice\PhpSpreadsheet\IOFactory::load($tmpPath);
+            $lines = [];
+
+            foreach ($spreadsheet->getAllSheets() as $sheet) {
+                foreach ($sheet->toArray(null, true, true, false) as $row) {
+                    $line = implode("\t", array_map(fn ($cell) => trim((string) ($cell ?? '')), $row));
+                    if ($line !== '') {
+                        $lines[] = $line;
+                    }
+                }
+            }
+
+            return trim(implode("\n", $lines));
+        } catch (\Throwable $e) {
+            Log::warning('Spreadsheet text extraction failed.', ['error' => $e->getMessage()]);
+
+            return '';
+        } finally {
+            @unlink($tmpPath);
+        }
+    }
+
+    /**
+     * CSV is already plain text — just normalize the encoding. Japanese CSV
+     * exports are frequently Shift-JIS rather than UTF-8, so detect and
+     * convert when needed.
+     */
+    private function extractCsvText(string $raw): string
+    {
+        if (! mb_check_encoding($raw, 'UTF-8')) {
+            $detected = mb_detect_encoding($raw, ['UTF-8', 'SJIS-win', 'SJIS', 'EUC-JP'], true);
+            if ($detected && $detected !== 'UTF-8') {
+                $raw = mb_convert_encoding($raw, 'UTF-8', $detected);
+            }
+        }
+
+        return trim($raw);
     }
 }
