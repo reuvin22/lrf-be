@@ -2,8 +2,11 @@
 
 namespace App\Jobs;
 
+use App\Events\InvoiceDocumentEvent;
 use App\Services\AnthropicVisionService;
 use App\Services\GoogleSheetService;
+use App\Services\InvoiceExtractionValidator;
+use App\Services\InvoiceNameMatchingService;
 use Carbon\Carbon;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -11,6 +14,7 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 /**
  * Runs the Claude Vision extraction for one OcrUploads row after the HTTP
@@ -19,9 +23,11 @@ use Illuminate\Support\Facades\Log;
  * Laravel runs ShouldQueue jobs dispatched this way in-process via the
  * built-in "sync" connection instead, which still preserves $tries/failed()
  * handling). The request only uploads the file(s) and writes a PROCESSING
- * row; this job does the (up to ~120s) Claude call and updates that row with
- * the result. Mirrors OcrUploadController's now-removed extractOcr()/
- * deriveAmount() logic.
+ * row; this job does the (up to ~120s) Claude call, updates that row, and
+ * mirrors the same extraction into InvoiceDocuments/InvoiceLines (vendor/site
+ * matching + multi-line support) — one Claude call populates both sheets.
+ * The InvoiceDocuments row reuses this upload's ID as its document_id so the
+ * two sheets correlate directly.
  */
 class ExtractOcrUpload implements ShouldQueue
 {
@@ -42,16 +48,39 @@ class ExtractOcrUpload implements ShouldQueue
         'uploaded_at', 'processed_at',
     ];
 
+    private const INVOICE_SHEET = 'InvoiceDocuments';
+
+    private const INVOICE_HEADERS = [
+        'document_id', 'uploaded_by', 'subcontractor_id', 'subcontractor_name',
+        'vendor_name_raw', 'issue_date', 'billing_month', 'document_type', 'category_id',
+        'subtotal', 'tax_amount', 'total_with_tax', 'file_path', 'ocr_result_raw',
+        'status', 'warnings', 'confirmed_by', 'confirmed_at', 'note',
+        'uploaded_at', 'processed_at',
+    ];
+
+    private const LINES_SHEET = 'InvoiceLines';
+
+    private const LINES_HEADERS = [
+        'line_id', 'invoice_document_id', 'site_id', 'site_name', 'site_name_raw',
+        'amount', 'amount_with_tax',
+    ];
+
     /**
-     * @param  array<int, string>  $filePaths
+     * @param  array<int, array{mime: string, base64: string}>  $decodedFiles  freshly-uploaded pages, bytes already in hand — no re-fetch needed
+     * @param  array<int, string>  $keptPaths  pre-existing pages the client didn't resubmit (update() only) — only these need fetching by URL
      */
     public function __construct(
         private readonly string $uploadId,
-        private readonly array $filePaths
+        private readonly array $decodedFiles = [],
+        private readonly array $keptPaths = []
     ) {}
 
-    public function handle(AnthropicVisionService $vision, GoogleSheetService $sheet): void
-    {
+    public function handle(
+        AnthropicVisionService $vision,
+        InvoiceNameMatchingService $matcher,
+        InvoiceExtractionValidator $validator,
+        GoogleSheetService $sheet
+    ): void {
         $located = $this->locate($sheet);
         if (! $located) {
             Log::warning('ExtractOcrUpload: row not found, skipping.', ['upload_id' => $this->uploadId]);
@@ -59,7 +88,10 @@ class ExtractOcrUpload implements ShouldQueue
             return;
         }
 
-        $files = $vision->filesFromUrls($this->filePaths);
+        $files = array_merge(
+            $vision->filesFromDecoded($this->decodedFiles),
+            $vision->filesFromUrls($this->keptPaths)
+        );
         $extracted = empty($files) ? null : $vision->extractInvoice($files);
 
         $update = $extracted === null
@@ -75,6 +107,7 @@ class ExtractOcrUpload implements ShouldQueue
         $update['processed_at'] = Carbon::now('Asia/Manila')->toDateTimeString();
 
         $this->updateRow($sheet, $located, $update);
+        $this->syncInvoiceDocument($sheet, $matcher, $validator, $located['data'], $extracted);
     }
 
     public function failed(\Throwable $e): void
@@ -92,6 +125,7 @@ class ExtractOcrUpload implements ShouldQueue
                     'status' => 'ERROR',
                     'processed_at' => Carbon::now('Asia/Manila')->toDateTimeString(),
                 ]);
+                $this->syncInvoiceDocument($sheet, app(InvoiceNameMatchingService::class), app(InvoiceExtractionValidator::class), $located['data'], null);
             }
         } catch (\Throwable $inner) {
             Log::error('ExtractOcrUpload: failed to mark row ERROR after job failure.', [
@@ -99,6 +133,88 @@ class ExtractOcrUpload implements ShouldQueue
                 'error' => $inner->getMessage(),
             ]);
         }
+    }
+
+    /**
+     * Mirror this upload's extraction into InvoiceDocuments/InvoiceLines,
+     * reusing the upload_id as document_id so the two sheets correlate.
+     * Upserts: creates the row on first extraction, updates it (and replaces
+     * its lines) on any re-extraction (e.g. OcrUploadController::update()
+     * re-running vision after new/changed pages).
+     *
+     * @param  array<string, mixed>  $uploadRow
+     * @param  array<string, mixed>|null  $extracted
+     */
+    private function syncInvoiceDocument(
+        GoogleSheetService $sheet,
+        InvoiceNameMatchingService $matcher,
+        InvoiceExtractionValidator $validator,
+        array $uploadRow,
+        ?array $extracted
+    ): void {
+        $documentId = $this->uploadId;
+        $now = Carbon::now('Asia/Manila')->toDateTimeString();
+
+        $document = [
+            'document_id' => $documentId,
+            'uploaded_by' => $uploadRow['uploaded_by'] ?? '',
+            'category_id' => $uploadRow['category_id'] ?? '',
+            'file_path' => $uploadRow['image_path'] ?? '',
+            'note' => $uploadRow['note'] ?? '',
+            'uploaded_at' => $uploadRow['uploaded_at'] ?? $now,
+            'processed_at' => $now,
+        ];
+
+        if ($extracted === null) {
+            $document['status'] = 'ERROR';
+        } else {
+            $warnings = $validator->validate($extracted);
+            $vendorCandidates = $matcher->candidatesForSubcontractor($extracted['vendor_name'] ?? null);
+            $topVendor = $vendorCandidates[0] ?? null;
+            $vendorPreselect = $topVendor && ! empty($topVendor['preselect']);
+
+            $document['vendor_name_raw'] = $extracted['vendor_name'] ?? '';
+            $document['issue_date'] = $extracted['issue_date'] ?? '';
+            $document['billing_month'] = $extracted['billing_month'] ?? '';
+            $document['document_type'] = $extracted['document_type'] ?? '';
+            $document['subtotal'] = $extracted['subtotal'] ?? '';
+            $document['tax_amount'] = $extracted['tax_amount'] ?? '';
+            $document['total_with_tax'] = $extracted['total_with_tax'] ?? '';
+            $document['ocr_result_raw'] = json_encode($extracted, JSON_UNESCAPED_UNICODE);
+            $document['status'] = 'NEEDS_REVIEW';
+            $document['warnings'] = $warnings;
+            $document['subcontractor_id'] = $vendorPreselect ? $topVendor['id'] : '';
+            $document['subcontractor_name'] = $vendorPreselect ? $topVendor['name'] : '';
+        }
+
+        $located = $this->locateInvoiceDocument($sheet, $documentId);
+        if ($located) {
+            $this->updateInvoiceDocumentAt($sheet, $located['rowNumber'], $document);
+        } else {
+            $this->appendInvoiceDocument($sheet, $document);
+        }
+
+        // Re-extraction (update()) replaces the line set entirely rather than
+        // appending on top of stale lines from a previous extraction.
+        $this->deleteInvoiceLinesFor($sheet, $documentId);
+
+        foreach (($extracted['lines'] ?? []) as $extractedLine) {
+            $siteCandidates = $matcher->candidatesForSite($extractedLine['site_name'] ?? null);
+            $topSite = $siteCandidates[0] ?? null;
+            $sitePreselect = $topSite && ! empty($topSite['preselect']);
+
+            $this->appendInvoiceLine($sheet, [
+                'line_id' => (string) Str::uuid(),
+                'invoice_document_id' => $documentId,
+                'site_id' => $sitePreselect ? $topSite['id'] : '',
+                'site_name' => $sitePreselect ? $topSite['name'] : '',
+                'site_name_raw' => $extractedLine['site_name'] ?? '',
+                'amount' => $extractedLine['amount'] ?? '',
+                'amount_with_tax' => $extractedLine['amount_with_tax'] ?? '',
+            ]);
+        }
+
+        event(new InvoiceDocumentEvent($document, strtolower($document['status'])));
     }
 
     /**
@@ -154,12 +270,63 @@ class ExtractOcrUpload implements ShouldQueue
         $merged = array_merge($located['data'], $update);
         $merged['upload_id'] = $this->uploadId;
 
-        $row = array_map(function ($h) use ($merged) {
-            $v = $merged[$h] ?? '';
+        $sheet->updateRow($this->spreadsheetId(), self::SHEET, $located['rowNumber'], $this->toRow($merged, self::HEADERS));
+    }
+
+    /**
+     * @return array{rowNumber: int, data: array<string, mixed>}|null
+     */
+    private function locateInvoiceDocument(GoogleSheetService $sheet, string $documentId): ?array
+    {
+        $rows = $sheet->getRowsAsAssoc($this->spreadsheetId(), self::INVOICE_SHEET);
+        foreach ($rows as $index => $row) {
+            if (($row['document_id'] ?? null) === $documentId) {
+                return ['rowNumber' => $index + 2, 'data' => $row];
+            }
+        }
+
+        return null;
+    }
+
+    private function appendInvoiceDocument(GoogleSheetService $sheet, array $data): void
+    {
+        $sheet->appendRow($this->spreadsheetId(), self::INVOICE_SHEET, $this->toRow($data, self::INVOICE_HEADERS));
+    }
+
+    private function updateInvoiceDocumentAt(GoogleSheetService $sheet, int $rowNumber, array $data): void
+    {
+        $sheet->updateRow($this->spreadsheetId(), self::INVOICE_SHEET, $rowNumber, $this->toRow($data, self::INVOICE_HEADERS));
+    }
+
+    private function appendInvoiceLine(GoogleSheetService $sheet, array $data): void
+    {
+        $sheet->appendRow($this->spreadsheetId(), self::LINES_SHEET, $this->toRow($data, self::LINES_HEADERS));
+    }
+
+    private function deleteInvoiceLinesFor(GoogleSheetService $sheet, string $documentId): void
+    {
+        $rows = $sheet->getRowsAsAssoc($this->spreadsheetId(), self::LINES_SHEET);
+        $rowNumbers = [];
+
+        foreach ($rows as $index => $row) {
+            if (($row['invoice_document_id'] ?? null) === $documentId) {
+                $rowNumbers[] = $index + 2;
+            }
+        }
+
+        // Delete bottom-up so earlier row numbers don't shift mid-loop.
+        rsort($rowNumbers);
+        foreach ($rowNumbers as $rowNumber) {
+            $sheet->deleteRow($this->spreadsheetId(), self::LINES_SHEET, $rowNumber);
+        }
+    }
+
+    private function toRow(array $data, array $headers): array
+    {
+        return array_map(function ($h) use ($data) {
+            $v = $data[$h] ?? '';
 
             return is_array($v) || is_object($v) ? json_encode($v, JSON_UNESCAPED_UNICODE) : (string) ($v ?? '');
-        }, self::HEADERS);
-
-        $sheet->updateRow($this->spreadsheetId(), self::SHEET, $located['rowNumber'], $row);
+        }, $headers);
     }
 }

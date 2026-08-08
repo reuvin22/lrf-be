@@ -55,11 +55,11 @@ class ExtractInvoiceDocument implements ShouldQueue
     ];
 
     /**
-     * @param  array<int, string>  $filePaths
+     * @param  array<int, array{mime: string, base64: string}>  $decodedFiles  bytes already in hand from the upload request — no re-fetch needed
      */
     public function __construct(
         private readonly string $documentId,
-        private readonly array $filePaths
+        private readonly array $decodedFiles
     ) {}
 
     public function handle(
@@ -76,7 +76,7 @@ class ExtractInvoiceDocument implements ShouldQueue
         }
 
         $document = $located['data'];
-        $files = $vision->filesFromUrls($this->filePaths);
+        $files = $vision->filesFromDecoded($this->decodedFiles);
         $extracted = empty($files) ? null : $vision->extractInvoice($files);
 
         Log::info('Invoice extraction result.', [

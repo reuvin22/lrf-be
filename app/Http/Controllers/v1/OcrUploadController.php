@@ -100,6 +100,7 @@ class OcrUploadController extends SheetResourceController
         $data['upload_id'] = (string) Str::uuid();
         $rawImages = $this->collectNewImages($data);
         $paths = [];
+        $decodedFiles = [];
 
         if (! empty($rawImages)) {
             $result = $this->processNewImages($firebase, $rawImages, $data['uploaded_by'] ?? 'unknown');
@@ -107,7 +108,8 @@ class OcrUploadController extends SheetResourceController
                 return $result;
             }
 
-            $paths = $result;
+            $paths = $result['paths'];
+            $decodedFiles = $result['decoded'];
             $data['image_path'] = $this->normalizePaths($paths);
         }
 
@@ -118,8 +120,9 @@ class OcrUploadController extends SheetResourceController
             // after this response is sent (afterResponse() — no queue/worker
             // needed, this app has no real database) instead of calling Claude
             // inline: that call can take up to ~120s, which blew past the
-            // frontend's request timeout when done synchronously.
-            $runsVision = ! empty($paths) && $vision->isEnabled();
+            // frontend's request timeout when done synchronously. The decoded
+            // file bytes are passed straight through — no re-fetch needed.
+            $runsVision = ! empty($decodedFiles) && $vision->isEnabled();
             if ($runsVision) {
                 $data['status'] = 'PROCESSING';
             }
@@ -128,7 +131,7 @@ class OcrUploadController extends SheetResourceController
             $this->appendRow($data);
 
             if ($runsVision) {
-                ExtractOcrUpload::dispatch($data['upload_id'], $paths)->afterResponse();
+                ExtractOcrUpload::dispatch($data['upload_id'], $decodedFiles)->afterResponse();
             }
 
             return response()->json([
@@ -164,6 +167,8 @@ class OcrUploadController extends SheetResourceController
         // by the user and must be deleted from Firebase.
         $touchesImages = array_key_exists('images_base64', $data) || array_key_exists('previous_image_paths', $data);
         $finalPaths = [];
+        $keepPaths = [];
+        $newDecodedFiles = [];
 
         try {
             $bucket = $firebase->storage()->getBucket();
@@ -182,7 +187,8 @@ class OcrUploadController extends SheetResourceController
                         return $result;
                     }
 
-                    $newPaths = $result;
+                    $newPaths = $result['paths'];
+                    $newDecodedFiles = $result['decoded'];
                 }
 
                 $finalPaths = array_values(array_merge($keepPaths, $newPaths));
@@ -202,8 +208,11 @@ class OcrUploadController extends SheetResourceController
             unset($data['image_base64'], $data['images_base64'], $data['previous_image_paths'], $data['use_vision']);
 
             // Same PROCESSING → deferred-extraction pattern as store(): persist
-            // the in-progress state and let the afterResponse() job (re-fetching
-            // every current page, kept + new, from Firebase) do the ~120s Claude call.
+            // the in-progress state and let the afterResponse() job do the
+            // ~120s Claude call. Newly-added pages are passed as decoded bytes
+            // (no re-fetch); kept pages only have a Firebase URL at this point
+            // (their bytes weren't resubmitted), so those alone are fetched by
+            // the job.
             $runsVision = ! empty($finalPaths) && $vision->isEnabled();
             if ($runsVision) {
                 $data['status'] = 'PROCESSING';
@@ -216,7 +225,7 @@ class OcrUploadController extends SheetResourceController
             $this->updateRowAt($located['rowNumber'], $merged);
 
             if ($runsVision) {
-                ExtractOcrUpload::dispatch($id, $finalPaths)->afterResponse();
+                ExtractOcrUpload::dispatch($id, $newDecodedFiles, $keepPaths)->afterResponse();
             }
 
             return response()->json([
@@ -466,40 +475,38 @@ class OcrUploadController extends SheetResourceController
 
     /**
      * Decode, validate, and upload every newly-added file to Firebase,
-     * building both the public URL list (for image_path) and the vision-file
-     * list Claude's vision API needs — decoded once and reused for both, so
-     * we never re-fetch what we just uploaded.
+     * returning both the public URL list (for image_path) and the decoded
+     * mime+base64 data — the caller passes the decoded data straight to the
+     * extraction job so it never has to re-fetch what it just uploaded.
      *
      * @param  array<int, string>  $rawImages
-     * @return array{paths: array<int, string>, files: array<int, array{media_type: string, base64?: string, text?: string}>}|JsonResponse
-     */
-    /**
-     * @param  array<int, string>  $rawImages
-     * @return array<int, string>|JsonResponse
+     * @return array{paths: array<int, string>, decoded: array<int, array{mime: string, base64: string}>}|JsonResponse
      */
     private function processNewImages(FirebaseService $firebase, array $rawImages, string $uploadedBy): array|JsonResponse
     {
         $bucket = $firebase->storage()->getBucket();
         $paths = [];
+        $decoded = [];
 
         foreach ($rawImages as $index => $dataUri) {
-            $decoded = $this->decodeImage($dataUri);
-            if ($decoded === null) {
+            $file = $this->decodeImage($dataUri);
+            if ($file === null) {
                 return response()->json([
                     'success' => false,
                     'message' => "File #{$index} is not a supported file type.",
                 ], 422);
             }
 
-            $uploaded = $this->uploadDecodedImage($bucket, $decoded, $uploadedBy, $index);
+            $uploaded = $this->uploadDecodedImage($bucket, $file, $uploadedBy, $index);
             if ($uploaded instanceof JsonResponse) {
                 return $uploaded;
             }
 
             $paths[] = $uploaded;
+            $decoded[] = $file;
         }
 
-        return $paths;
+        return ['paths' => $paths, 'decoded' => $decoded];
     }
 
     /**
@@ -635,6 +642,7 @@ class OcrUploadController extends SheetResourceController
         $now = Carbon::now('Asia/Manila');
 
         $filePaths = [];
+        $decodedFiles = [];
 
         foreach ($data['files'] as $i => $file) {
             $decoded = $this->decodeInvoiceFile($file['data']);
@@ -651,6 +659,7 @@ class OcrUploadController extends SheetResourceController
             }
 
             $filePaths[] = $uploaded;
+            $decodedFiles[] = $decoded;
         }
 
         $document = [
@@ -681,16 +690,16 @@ class OcrUploadController extends SheetResourceController
                 // needed, this app has no real database) instead of calling
                 // Claude inline: that call can take up to ~120s, which blew past
                 // the frontend's request timeout when done synchronously. The
-                // deferred job re-fetches these files by URL, does the Claude
-                // call, appends InvoiceLines, and updates this row (+ fires
-                // InvoiceDocumentEvent) once done.
+                // decoded file bytes are passed straight through (no re-fetch);
+                // the deferred job does the Claude call, appends InvoiceLines,
+                // and updates this row (+ fires InvoiceDocumentEvent) once done.
                 $document['status'] = 'PROCESSING';
             }
 
             $this->appendInvoiceDocument($document);
 
             if ($runsVision) {
-                ExtractInvoiceDocument::dispatch($documentId, $filePaths)->afterResponse();
+                ExtractInvoiceDocument::dispatch($documentId, $decodedFiles)->afterResponse();
             }
         } catch (\Throwable $e) {
             Log::error('Failed to save invoice document to the spreadsheet.', [

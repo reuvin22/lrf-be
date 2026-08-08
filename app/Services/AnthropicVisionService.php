@@ -244,6 +244,25 @@ PROMPT;
     }
 
     /**
+     * Convert already-decoded file data (mime + base64, straight from the
+     * upload request — no HTTP round-trip) into Claude-ready vision files.
+     * Prefer this over filesFromUrls() whenever the raw bytes are already in
+     * hand, e.g. a file uploaded in the same request that's about to be
+     * extracted (via afterResponse()) — re-fetching it from Firebase would
+     * just be a redundant network call for data already in memory.
+     *
+     * @param  array<int, array{mime: string, base64: string}>  $decoded
+     * @return array<int, array{media_type: string, base64?: string, text?: string}>
+     */
+    public function filesFromDecoded(array $decoded): array
+    {
+        return array_values(array_filter(array_map(
+            fn ($file) => in_array($file['mime'] ?? '', self::ALLOWED_MIME_TYPES, true) ? $this->buildVisionFile($file) : null,
+            $decoded
+        )));
+    }
+
+    /**
      * @return array{media_type: string, base64?: string, text?: string}|null
      */
     private function fetchAsVisionFile(string $url): ?array
