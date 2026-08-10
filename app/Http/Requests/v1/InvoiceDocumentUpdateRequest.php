@@ -21,6 +21,7 @@ class InvoiceDocumentUpdateRequest extends FormRequest
             'billing_month' => 'nullable|string',
             'document_type' => 'nullable|string|in:INVOICE,MONTHLY_STATEMENT,QUOTATION,DELIVERY_NOTE,EMAIL,OTHER',
             'category_id' => 'nullable|string',
+            'status' => 'nullable|string|in:PENDING,PROCESSING,NEEDS_REVIEW,CONFIRMED,ERROR,REJECTED',
             'subtotal' => 'nullable|numeric',
             'tax_amount' => 'nullable|numeric',
             'total_with_tax' => 'nullable|numeric',

@@ -18,12 +18,14 @@ class SheetsSetup extends Command
         'ACTIVE' => '#1E8B4C',
         'COMPLETED' => '#1E8B4C',
         'SITE' => '#1E8B4C',
+        'CONFIRMED' => '#1E8B4C',
 
         // ── Inactive / negative ──────────────────────────────────────────────
         'INACTIVE' => '#C0392B',
         'RESIGNED' => '#C0392B',
         'TERMINATED' => '#C0392B',
         'ERROR' => '#C0392B',
+        'REJECTED' => '#922B21',
 
         // ── In-progress / working ────────────────────────────────────────────
         'WORKING' => '#2471A3',
@@ -37,6 +39,7 @@ class SheetsSetup extends Command
         'PREPARING' => '#CA6F1E',
         'TRAVEL' => '#CA6F1E',
         'PART_TIME' => '#CA6F1E',
+        'NEEDS_REVIEW' => '#D68910',
 
         // ── Not started / end of day ─────────────────────────────────────────
         'NOT_STARTED' => '#717D7E',
@@ -74,6 +77,14 @@ class SheetsSetup extends Command
 
         // ── Segment type ─────────────────────────────────────────────────────
         'TRAVEL_SEG' => '#CA6F1E', // alias — 'TRAVEL' already covers this
+
+        // ── Document type (Invoice Documents) ────────────────────────────────
+        'INVOICE' => '#1A5276',
+        'MONTHLY_STATEMENT' => '#6C3483',
+        'QUOTATION' => '#B7950B',
+        'DELIVERY_NOTE' => '#117A65',
+        'EMAIL' => '#2471A3',
+        'OTHER' => '#717D7E',
     ];
 
     // Registry — add one entry per controller that syncs to Sheets.
@@ -268,7 +279,8 @@ class SheetsSetup extends Command
             'title' => 'LRF OCR Uploads',
             'tab' => 'OcrUploads',
             'headers' => [
-                'upload_id', 'uploaded_by', 'category_id', 'site_id', 'subcontractor_id',
+                'upload_id', 'uploaded_by', 'category_id', 'site_id', 'site_name',
+                'subcontractor_id', 'subcontractor_name',
                 'attendance_id', 'upload_source', 'status', 'image_path',
                 'ocr_result_amount', 'ocr_result_date', 'ocr_result_raw',
                 'confirmed', 'confirmed_by', 'confirmed_at', 'note',
@@ -330,7 +342,7 @@ class SheetsSetup extends Command
             'title' => 'LRF Invoice Documents',
             'tab' => 'InvoiceDocuments',
             'headers' => [
-                'document_id', 'uploaded_by', 'subcontractor_id', 'subcontractor_name',
+                'document_id', 'upload_id', 'uploaded_by', 'subcontractor_id', 'subcontractor_name',
                 'vendor_name_raw', 'issue_date', 'billing_month', 'document_type', 'category_id',
                 'subtotal', 'tax_amount', 'total_with_tax', 'file_path', 'ocr_result_raw',
                 'status', 'warnings', 'confirmed_by', 'confirmed_at', 'note',
@@ -338,7 +350,7 @@ class SheetsSetup extends Command
             ],
             'enums' => [
                 'document_type' => ['INVOICE', 'MONTHLY_STATEMENT', 'QUOTATION', 'DELIVERY_NOTE', 'EMAIL', 'OTHER'],
-                'status' => ['PENDING', 'PROCESSING', 'NEEDS_REVIEW', 'CONFIRMED', 'ERROR'],
+                'status' => ['PENDING', 'PROCESSING', 'NEEDS_REVIEW', 'CONFIRMED', 'ERROR', 'REJECTED'],
             ],
             'dates' => ['issue_date', 'confirmed_at', 'uploaded_at', 'processed_at'],
         ],

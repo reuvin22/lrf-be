@@ -268,6 +268,7 @@ class OcrUploadController extends SheetResourceController
 
         if ($data['action'] === 'reject') {
             $merged['status'] = 'REJECTED';
+            $this->rejectInvoiceDocumentsFor($id, $data['confirmed_by'], $now);
         }
 
         $this->updateRowAt($located['rowNumber'], $merged);
@@ -279,6 +280,33 @@ class OcrUploadController extends SheetResourceController
                 : 'OCR upload rejected successfully.',
             'data' => $this->presentRow($merged),
         ]);
+    }
+
+    /**
+     * Cascade a rejected OCR upload to every InvoiceDocuments row it produced
+     * (matched by `upload_id`, falling back to `document_id` for rows written
+     * before that column existed — same matching rule as
+     * deleteInvoiceDocumentsFor()), so a rejected upload doesn't leave its
+     * mirrored invoice documents stuck in NEEDS_REVIEW/CONFIRMED.
+     */
+    private function rejectInvoiceDocumentsFor(string $uploadId, string $confirmedBy, string $confirmedAt): void
+    {
+        $rows = $this->safeReadSheet(self::INVOICE_SHEET);
+
+        foreach ($rows as $index => $row) {
+            if (($row['upload_id'] ?? null) !== $uploadId && ($row['document_id'] ?? null) !== $uploadId) {
+                continue;
+            }
+
+            $document = array_merge($row, [
+                'status' => 'REJECTED',
+                'confirmed_by' => $confirmedBy,
+                'confirmed_at' => $confirmedAt,
+            ]);
+
+            $this->updateInvoiceDocumentAt($index + 2, $document);
+            event(new InvoiceDocumentEvent($document, 'rejected'));
+        }
     }
 
     public function destroy(Request $request, ?string $id = null, ?FirebaseService $firebase = null): JsonResponse
