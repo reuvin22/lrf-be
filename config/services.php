@@ -36,18 +36,45 @@ return [
     ],
 
     'firebase' => [
-        'credentials' => env('FIREBASE_CREDENTIALS_FILE'),
+        // Stored as either "storage/app/<file>.json" or just "<file>.json"
+        // (both conventions appear across .env / .env.example) — normalize to
+        // an absolute path so it resolves correctly regardless of the PHP
+        // process's current working directory, not just when launched from
+        // the project root.
+        'credentials' => ($file = env('FIREBASE_CREDENTIALS_FILE'))
+            ? base_path(str_starts_with($file, 'storage/') ? $file : 'storage/app/'.$file)
+            : null,
         'storage_bucket' => env('FIREBASE_STORAGE_BUCKET'),
     ],
 
     'google_sheets' => [
-        'credentials' => env('GOOGLE_SHEETS_CREDENTIALS_FILE'),
+        'credentials' => ($file = env('GOOGLE_SHEETS_CREDENTIALS_FILE'))
+            ? base_path(str_starts_with($file, 'storage/') ? $file : 'storage/app/'.$file)
+            : null,
         'application_name' => env('GOOGLE_SHEETS_APPLICATION_NAME', 'LRF App'),
         'spreadsheet_id' => env('GOOGLE_SPREADSHEET_ID'),
+    ],
+
+    'google_vision' => [
+        // Reuses the same service account as google_sheets above (its
+        // 'credentials' is already normalized to an absolute path) — no
+        // separate credentials file needed, as long as that service account
+        // also has the Vision API enabled in its GCP project.
+        'enabled' => env('GOOGLE_VISION_ENABLED', false),
     ],
 
     'anthropic' => [
         'api_key' => env('ANTHROPIC_API_KEY'),
         'model' => env('ANTHROPIC_MODEL', 'claude-sonnet-5'),
     ],
+
+    'gemini' => [
+        'api_key' => env('GEMINI_API_KEY'),
+        'model' => env('GEMINI_MODEL', 'gemini-2.5-flash'),
+    ],
+
+    // Which LLM the invoice-extraction pipeline (LlmVisionService) calls —
+    // 'gemini' or 'anthropic'. Switch providers by changing this one value;
+    // both implementations stay in the codebase.
+    'vision_provider' => env('VISION_PROVIDER', 'gemini'),
 ];

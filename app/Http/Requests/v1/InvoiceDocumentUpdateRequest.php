@@ -16,6 +16,7 @@ class InvoiceDocumentUpdateRequest extends FormRequest
         return [
             'vendor_name_raw' => 'nullable|string',
             'subcontractor_id' => 'nullable|string',
+            'subcontractor_name' => 'nullable|string',
             'issue_date' => 'nullable|date',
             'billing_month' => 'nullable|string',
             'document_type' => 'nullable|string|in:INVOICE,MONTHLY_STATEMENT,QUOTATION,DELIVERY_NOTE,EMAIL,OTHER',

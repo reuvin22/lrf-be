@@ -10,9 +10,9 @@ use App\Http\Requests\v1\OcrUploadRequest;
 use App\Http\Requests\v1\OcrUploadReviewRequest;
 use App\Jobs\ExtractInvoiceDocument;
 use App\Jobs\ExtractOcrUpload;
-use App\Services\AnthropicVisionService;
 use App\Services\FirebaseService;
 use App\Services\InvoiceNameMatchingService;
+use App\Services\LlmVisionService;
 use Carbon\Carbon;
 use Google\Cloud\Storage\Bucket;
 use Illuminate\Http\JsonResponse;
@@ -56,7 +56,7 @@ class OcrUploadController extends SheetResourceController
     private const INVOICE_SHEET = 'InvoiceDocuments';
 
     private const INVOICE_HEADERS = [
-        'document_id', 'uploaded_by', 'subcontractor_id', 'subcontractor_name',
+        'document_id', 'upload_id', 'uploaded_by', 'subcontractor_id', 'subcontractor_name',
         'vendor_name_raw', 'issue_date', 'billing_month', 'document_type', 'category_id',
         'subtotal', 'tax_amount', 'total_with_tax', 'file_path', 'ocr_result_raw',
         'status', 'warnings', 'confirmed_by', 'confirmed_at', 'note',
@@ -94,7 +94,7 @@ class OcrUploadController extends SheetResourceController
         return response()->json(['success' => true, 'data' => $this->presentRow($located['data'])]);
     }
 
-    public function store(OcrUploadRequest $request, FirebaseService $firebase, AnthropicVisionService $vision): JsonResponse
+    public function store(OcrUploadRequest $request, FirebaseService $firebase, LlmVisionService $vision): JsonResponse
     {
         $data = $request->validated();
         $data['upload_id'] = (string) Str::uuid();
@@ -118,8 +118,8 @@ class OcrUploadController extends SheetResourceController
         try {
             // Write the row as PROCESSING and defer extraction to run right
             // after this response is sent (afterResponse() — no queue/worker
-            // needed, this app has no real database) instead of calling Claude
-            // inline: that call can take up to ~120s, which blew past the
+            // needed, this app has no real database) instead of calling the
+            // LLM inline: that call can take up to ~120s, which blew past the
             // frontend's request timeout when done synchronously. The decoded
             // file bytes are passed straight through — no re-fetch needed.
             $runsVision = ! empty($decodedFiles) && $vision->isEnabled();
@@ -150,7 +150,7 @@ class OcrUploadController extends SheetResourceController
         }
     }
 
-    public function update(OcrUploadRequest $request, string $id, FirebaseService $firebase, AnthropicVisionService $vision): JsonResponse
+    public function update(OcrUploadRequest $request, string $id, FirebaseService $firebase, LlmVisionService $vision): JsonResponse
     {
         $located = $this->locate($id);
         if (! $located) {
@@ -209,7 +209,7 @@ class OcrUploadController extends SheetResourceController
 
             // Same PROCESSING → deferred-extraction pattern as store(): persist
             // the in-progress state and let the afterResponse() job do the
-            // ~120s Claude call. Newly-added pages are passed as decoded bytes
+            // ~120s LLM call. Newly-added pages are passed as decoded bytes
             // (no re-fetch); kept pages only have a Firebase URL at this point
             // (their bytes weren't resubmitted), so those alone are fetched by
             // the job.
@@ -324,7 +324,7 @@ class OcrUploadController extends SheetResourceController
 
     /**
      * Shape one OcrUploads row for API responses: parse ocr_result_raw back
-     * into the structured object Claude actually extracted (document_type,
+     * into the structured object the LLM actually extracted (document_type,
      * vendor_name, lines, subtotal, tax_amount, total_with_tax, notes,
      * warnings, ...) instead of leaving it as the JSON-encoded string the
      * sheet cell stores it as. Falls back to the raw value if it isn't
@@ -477,10 +477,13 @@ class OcrUploadController extends SheetResourceController
      * Decode, validate, and upload every newly-added file to Firebase,
      * returning both the public URL list (for image_path) and the decoded
      * mime+base64 data — the caller passes the decoded data straight to the
-     * extraction job so it never has to re-fetch what it just uploaded.
+     * extraction job so it never has to re-fetch what it just uploaded. Each
+     * decoded entry also carries its own `url` — PDFs need it to run Vision's
+     * async, all-pages OCR (LlmVisionService::buildVisionFile()), which reads
+     * directly from GCS rather than accepting inline bytes.
      *
      * @param  array<int, string>  $rawImages
-     * @return array{paths: array<int, string>, decoded: array<int, array{mime: string, base64: string}>}|JsonResponse
+     * @return array{paths: array<int, string>, decoded: array<int, array{mime: string, base64: string, url: string}>}|JsonResponse
      */
     private function processNewImages(FirebaseService $firebase, array $rawImages, string $uploadedBy): array|JsonResponse
     {
@@ -502,6 +505,7 @@ class OcrUploadController extends SheetResourceController
                 return $uploaded;
             }
 
+            $file['url'] = $uploaded;
             $paths[] = $uploaded;
             $decoded[] = $file;
         }
@@ -634,7 +638,7 @@ class OcrUploadController extends SheetResourceController
     public function invoiceStore(
         InvoiceDocumentRequest $request,
         FirebaseService $firebase,
-        AnthropicVisionService $vision
+        LlmVisionService $vision
     ): JsonResponse {
         $data = $request->validated();
         $documentId = (string) Str::uuid();
@@ -658,12 +662,14 @@ class OcrUploadController extends SheetResourceController
                 return $uploaded;
             }
 
+            $decoded['url'] = $uploaded;
             $filePaths[] = $uploaded;
             $decodedFiles[] = $decoded;
         }
 
         $document = [
             'document_id' => $documentId,
+            'upload_id' => $documentId,
             'uploaded_by' => $uploadedBy ?? '',
             'category_id' => $data['category_id'] ?? '',
             'file_path' => $filePaths,
@@ -687,11 +693,11 @@ class OcrUploadController extends SheetResourceController
             } else {
                 // Write the row as PROCESSING and defer extraction to run right
                 // after this response is sent (afterResponse() — no queue/worker
-                // needed, this app has no real database) instead of calling
-                // Claude inline: that call can take up to ~120s, which blew past
+                // needed, this app has no real database) instead of calling the
+                // LLM inline: that call can take up to ~120s, which blew past
                 // the frontend's request timeout when done synchronously. The
                 // decoded file bytes are passed straight through (no re-fetch);
-                // the deferred job does the Claude call, appends InvoiceLines,
+                // the deferred job does the LLM call, appends InvoiceLines,
                 // and updates this row (+ fires InvoiceDocumentEvent) once done.
                 $document['status'] = 'PROCESSING';
             }

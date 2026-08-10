@@ -14,7 +14,7 @@ class InvoiceDocumentConfirmRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'confirmed_by' => 'required|uuid',
+            'confirmed_by' => 'required|string',
             'subcontractor_id' => 'nullable|string|required_without:new_subcontractor_name',
             'new_subcontractor_name' => 'nullable|string|required_without:subcontractor_id',
 

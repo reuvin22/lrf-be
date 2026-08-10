@@ -34,7 +34,7 @@ class OcrUploadRequest extends FormRequest
             'previous_image_paths.*' => 'nullable|string',
             'use_vision' => 'nullable|boolean',
             'confirmed' => 'nullable|boolean',
-            'confirmed_by' => 'nullable|uuid',
+            'confirmed_by' => 'nullable|string',
             'confirmed_at' => 'nullable|date',
 
             'note' => 'nullable|string',

@@ -15,7 +15,7 @@ class OcrUploadReviewRequest extends FormRequest
     {
         return [
             'action' => 'required|in:approve,reject',
-            'confirmed_by' => 'required|uuid',
+            'confirmed_by' => 'required|string',
         ];
     }
 }
