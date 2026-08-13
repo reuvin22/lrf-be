@@ -36,20 +36,26 @@ return [
     ],
 
     'firebase' => [
-        // Stored as either "storage/app/<file>.json" or just "<file>.json"
-        // (both conventions appear across .env / .env.example) — normalize to
-        // an absolute path so it resolves correctly regardless of the PHP
-        // process's current working directory, not just when launched from
-        // the project root.
+        // Stored as either "storage/app/<file>.json", just "<file>.json", or
+        // an absolute path (e.g. Render's Secret Files, mounted at
+        // "/etc/secrets/<file>.json") — normalize to an absolute path so it
+        // resolves correctly regardless of the PHP process's current working
+        // directory, not just when launched from the project root. Absolute
+        // paths are already resolved and pass through untouched — running
+        // them through base_path()/storage/app/ would mangle them.
         'credentials' => ($file = env('FIREBASE_CREDENTIALS_FILE'))
-            ? base_path(str_starts_with($file, 'storage/') ? $file : 'storage/app/'.$file)
+            ? (str_starts_with($file, '/')
+                ? $file
+                : base_path(str_starts_with($file, 'storage/') ? $file : 'storage/app/'.$file))
             : null,
         'storage_bucket' => env('FIREBASE_STORAGE_BUCKET'),
     ],
 
     'google_sheets' => [
         'credentials' => ($file = env('GOOGLE_SHEETS_CREDENTIALS_FILE'))
-            ? base_path(str_starts_with($file, 'storage/') ? $file : 'storage/app/'.$file)
+            ? (str_starts_with($file, '/')
+                ? $file
+                : base_path(str_starts_with($file, 'storage/') ? $file : 'storage/app/'.$file))
             : null,
         'application_name' => env('GOOGLE_SHEETS_APPLICATION_NAME', 'LRF App'),
         'spreadsheet_id' => env('GOOGLE_SPREADSHEET_ID'),
